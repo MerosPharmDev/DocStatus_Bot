@@ -2,7 +2,8 @@ FROM python:3.13-alpine
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    ACCESS_PATH=/app/data/access.json
+    ACCESS_PATH=/app/data/access.json \
+    AUDIT_PATH=/app/data/check_events.jsonl
 
 WORKDIR /app
 
@@ -12,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 
-# Каталог состояния: при APP_ENV=development сюда пишется access.json (монтируется с хоста).
+# Каталог состояния: в development сюда пишутся access.json и журнал проверок.
 RUN mkdir -p /app/data
 
 CMD ["python", "bot.py"]

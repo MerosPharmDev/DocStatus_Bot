@@ -2,12 +2,14 @@
 import base64
 import html
 import json
+import logging
 import math
 import os
 import re
 import sys
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -36,12 +38,15 @@ load_env_file(ROOT / ".env")
 CONFIG_PATH = ROOT / "config.json"
 APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
 ACCESS_PATH = Path(os.environ.get("ACCESS_PATH") or ROOT / "access.json")
+AUDIT_PATH = Path(os.environ.get("AUDIT_PATH") or ROOT / "data" / "check_events.jsonl")
 USER_STORE = None
 DOC_RE = re.compile(r"^[0-9A-Za-zА-Яа-яЁё._/-]{1,50}$")
 CACHE = {}
 WAREHOUSE_CACHE = {"loaded_at": 0.0, "items": {}, "error": ""}
 WAITING_FOR_DOC = set()
 REGISTRATION = {}
+AUDIT_LOCK = threading.Lock()
+LOCAL_TIMEZONE = timezone(timedelta(hours=5), name="Asia/Tashkent")
 
 BUTTON_CHECK = "🔍 Проверить заявку"
 BUTTON_HELP = "ℹ️ Инструкция"
@@ -54,26 +59,58 @@ BUTTON_LANG_UZ = "🇺🇿 O'zbekcha"
 BUTTON_SEND_PHONE_RU = "📱 Отправить телефон"
 BUTTON_SEND_PHONE_UZ = "📱 Telefonni yuborish"
 
+BUTTONS = {
+    "ru": {
+        "check": BUTTON_CHECK,
+        "help": BUTTON_HELP,
+        "health": BUTTON_HEALTH,
+        "cancel": BUTTON_CANCEL,
+        "register": BUTTON_REGISTER,
+        "chat_id": BUTTON_CHAT_ID,
+    },
+    "uz": {
+        "check": "🔍 Arizani tekshirish",
+        "help": "ℹ️ Qo'llanma",
+        "health": "🩺 Tizimlar holati",
+        "cancel": "❌ Bekor qilish",
+        "register": "📝 Ro'yxatdan o'tish",
+        "chat_id": "🆔 Chat ID",
+    },
+}
 
-def main_keyboard(allowed=False):
+
+def normalized_language(value):
+    return "uz" if str(value or "").strip().lower() == "uz" else "ru"
+
+
+def button(language, name):
+    return BUTTONS[normalized_language(language)][name]
+
+
+def is_button(text, name):
+    return any(text == values[name] for values in BUTTONS.values())
+
+
+def main_keyboard(allowed=False, language="ru"):
+    language = normalized_language(language)
     if not allowed:
         return {
             "keyboard": [
-                [{"text": BUTTON_REGISTER}],
-                [{"text": BUTTON_HELP}, {"text": BUTTON_CHAT_ID}],
+                [{"text": button(language, "register")}],
+                [{"text": button(language, "help")}, {"text": button(language, "chat_id")}],
             ],
             "resize_keyboard": True,
             "is_persistent": True,
-            "input_field_placeholder": "Пройдите регистрацию",
+            "input_field_placeholder": "Ro'yxatdan o'ting" if language == "uz" else "Пройдите регистрацию",
         }
     return {
         "keyboard": [
-            [{"text": BUTTON_CHECK}],
-            [{"text": BUTTON_HELP}, {"text": BUTTON_HEALTH}],
+            [{"text": button(language, "check")}],
+            [{"text": button(language, "help")}, {"text": button(language, "health")}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
-        "input_field_placeholder": "Введите номер заявки",
+        "input_field_placeholder": "Ariza raqamini kiriting" if language == "uz" else "Введите номер заявки",
     }
 
 
@@ -89,21 +126,43 @@ def language_keyboard():
 def phone_keyboard(language):
     button_text = BUTTON_SEND_PHONE_UZ if language == "uz" else BUTTON_SEND_PHONE_RU
     return {
-        "keyboard": [[{"text": button_text, "request_contact": True}], [{"text": BUTTON_CANCEL}]],
+        "keyboard": [[{"text": button_text, "request_contact": True}], [{"text": button(language, "cancel")}]],
         "resize_keyboard": True,
         "one_time_keyboard": True,
         "input_field_placeholder": "+998 XX XXX XX XX",
     }
 
-def force_reply_keyboard():
+def force_reply_keyboard(language="ru"):
     return {
         "force_reply": True,
         "selective": True,
-        "input_field_placeholder": "Один или несколько ID заявок",
+        "input_field_placeholder": (
+            "Bir yoki bir nechta ariza IDsi" if normalized_language(language) == "uz"
+            else "Один или несколько ID заявок"
+        ),
     }
 
 
-def help_text():
+def help_text(language="ru"):
+    if normalized_language(language) == "uz":
+        return (
+            "Botdan qanday foydalaniladi:\n\n"
+            "1. «🔍 Arizani tekshirish» tugmasini bosing.\n"
+            "2. Smartupdagi bir yoki bir nechta ariza IDsini yuboring.\n"
+            "3. Bot joriy bosqich, ombor va aniqlangan muammolarni ko'rsatadi.\n\n"
+            "Bir nechta raqamni bo'sh joy, vergul yoki yangi qatordan yuborish mumkin.\n"
+            "/check 4411939 4411940 buyrug'idan ham foydalanish mumkin.\n\n"
+            "Bosqichlar bo'yicha mas'ullar:\n"
+            "• Qoralama — operator rasmiylashtirishni yakunlaydi.\n"
+            "• Yangi — operator arizani qayta ishlashga o'tkazadi.\n"
+            "• Qayta ishlanmoqda — moliya bo'limi tekshiradi.\n"
+            "• Kutilmoqda — order, BYAS, yig'ish, savat va seriyalar tekshiriladi.\n"
+            "• Jo'natildi yoki Yetkazildi — yig'ish, savat va seriyalar tekshiriladi.\n"
+            "• Arxivlandi — hujjat o'tkazilishi, EHF holati va imzosi, zarur bo'lsa shartnoma tekshiriladi.\n\n"
+            "Order yoki BYAS topilmasa, yig'ish tugallanmagan bo'lsa, savatda tovar qolsa "
+            "yoki seriyalar mos kelmasa — omborga murojaat qiling.\n\n"
+            "TMS tekshiruvi vaqtincha o'chirilgan."
+        )
     return (
         "Как пользоваться ботом:\n\n"
         "1. Нажмите «🔍 Проверить заявку».\n"
@@ -117,11 +176,230 @@ def help_text():
         "• В обработке — проверка финансовым отделом.\n"
         "• В ожидании — проверяются ордер, БЯС, сборка, корзина и серии.\n"
         "• Отгружен или Доставлен — проверяются сборка, корзина и серии.\n"
-        "• Архивирован — проверяются бухгалтерия и отправка ЭСФ.\n\n"
+        "• Архивирован — проверяются проведение документа, статус и подпись ЭСФ, при необходимости договор.\n\n"
         "Если ордер или БЯС не найдены, сборка не завершена, в корзине остался товар "
         "или серии не совпали — обратитесь на склад.\n\n"
         "Проверка TMS временно отключена."
     )
+
+
+# Result formatting is shared by both languages.  Keeping the translation here means
+# business rules cannot silently diverge between the Russian and Uzbek interfaces.
+UZ_REPLACEMENTS = {
+    "Обратитесь на склад: товар необходимо убрать из корзины": "Omborga murojaat qiling: tovarni savatdan olib tashlash kerak",
+    "Обратитесь на склад: проверьте серии товара внутри сборки": "Omborga murojaat qiling: yig'im ichidagi tovar seriyalarini tekshiring",
+    "Заявка всё ещё находится в ожидании. Обратитесь на склад": "Ariza hali ham kutish bosqichida. Omborga murojaat qiling",
+    "Обратитесь на склад для перевода заявки в статус «Доставлен»": "Arizani «Yetkazildi» holatiga o'tkazish uchun omborga murojaat qiling",
+    "Заявка находится в черновике и ещё не запущена в работу": "Ariza qoralamada va hali ishga tushirilmagan",
+    "Завершить оформление и перевести заявку в стадию «Новый»": "Rasmiylashtirishni tugatib, arizani «Yangi» bosqichiga o'tkazish",
+    "Перевести заявку в стадию «В обработке»": "Arizani «Qayta ishlanmoqda» bosqichiga o'tkazish",
+    "Склад должен перевести заявку дальше": "Ombor arizani keyingi bosqichga o'tkazishi kerak",
+    "Для этой стадии правило проверки ещё не настроено": "Bu bosqich uchun tekshiruv qoidasi hali sozlanmagan",
+    "Серии или количество товара в Smartup и WMS не совпадают": "Smartup va WMSdagi tovar seriyasi yoki miqdori mos emas",
+    "Склад должен проверить товар внутри сборки": "Ombor yig'im ichidagi tovarni tekshirishi kerak",
+    "Заявка сохранена как черновик и ещё не запущена в работу": "Ariza qoralama sifatida saqlangan va hali ishga tushirilmagan",
+    "Оператор должен завершить оформление заявки и перевести её в стадию «Новый»": "Operator arizani rasmiylashtirishni tugatib, «Yangi» bosqichiga o'tkazishi kerak",
+    "Заявка ещё не передана на финансовую проверку": "Ariza hali moliyaviy tekshiruvga yuborilmagan",
+    "Оператор должен перевести заявку в стадию «В обработке»": "Operator arizani «Qayta ishlanmoqda» bosqichiga o'tkazishi kerak",
+    "После этого заявка будет передана в финансовый отдел": "Shundan keyin ariza moliya bo'limiga yuboriladi",
+    "Заявка передана в финансовый отдел": "Ariza moliya bo'limiga yuborildi",
+    "Выполняется проверка в системе «Плюсовой баланс»": "«Plyusovoy balans» tizimida tekshiruv bajarilmoqda",
+    "Если стадия долго не меняется — обратитесь в финансовый отдел": "Bosqich uzoq vaqt o'zgarmasa, moliya bo'limiga murojaat qiling",
+    "Склад не сопоставлен с настройками: выполнен поиск по WMS": "Ombor sozlamalarga mos kelmadi: WMS bo'yicha qidiruv bajarildi",
+    "WMS проверить не удалось: нет настроенных складов": "WMSni tekshirib bo'lmadi: sozlangan omborlar yo'q",
+    "Для склада не настроена WMS": "Ombor uchun WMS sozlanmagan",
+    "Расходный ордер не найден в WMS": "WMSda chiqim orderi topilmadi",
+    "Сборка не начата: БЯС не выбрана": "Yig'ish boshlanmagan: BYAS tanlanmagan",
+    "Сборка товара не завершена": "Tovarni yig'ish yakunlanmagan",
+    "Сборка не завершена: несобранных позиций —": "Yig'ish yakunlanmagan, yig'ilmagan pozitsiyalar:",
+    "В корзине осталось товара": "Savatda tovar qolgan",
+    "Не удалось проверить серии товара": "Tovar seriyalarini tekshirib bo'lmadi",
+    "Сверка серий не выполнена": "Seriyalar solishtirilmadi",
+    "Сборка завершена, но заявка всё ещё находится в ожидании": "Yig'ish tugagan, ammo ariza hali ham kutish bosqichida",
+    "Заявка ещё не переведена в статус «Доставлен»": "Ariza hali «Yetkazildi» holatiga o'tkazilmagan",
+    "Доставленная заявка ещё не архивирована": "Yetkazilgan ariza hali arxivlanmagan",
+    "Передать заявку в бухгалтерию": "Arizani buxgalteriyaga topshirish",
+    "Склад должен убрать товар из корзины": "Ombor tovarni savatdan olib tashlashi kerak",
+    "Склад должен собрать оставшиеся товары": "Ombor qolgan tovarlarni yig'ishi kerak",
+    "Склад должен выбрать БЯС и начать сборку": "Ombor BYASni tanlab, yig'ishni boshlashi kerak",
+    "Повторить проверку или обратиться на склад": "Tekshiruvni takrorlash yoki omborga murojaat qilish",
+    "Обратиться к администратору интеграции": "Integratsiya administratoriga murojaat qilish",
+    "Обратиться к администратору бота": "Bot administratoriga murojaat qilish",
+    "Обратиться в бухгалтерию": "Buxgalteriyaga murojaat qilish",
+    "Обратиться на склад": "Omborga murojaat qilish",
+    "Обратитесь к оператору": "Operatorga murojaat qiling",
+    "Обратитесь в бухгалтерию": "Buxgalteriyaga murojaat qiling",
+    "Обратитесь на склад": "Omborga murojaat qiling",
+    "Smartup недоступен": "Smartup ishlamayapti",
+    "Не удалось получить данные из WMS": "WMSdan ma'lumot olib bo'lmadi",
+    "Бухгалтерия недоступна, статус ЭСФ не проверен": "Buxgalteriya ishlamayapti, EHF holati tekshirilmadi",
+    "Бухгалтерия недоступна": "Buxgalteriya ishlamayapti",
+    "Невозможно определить, какую систему нужно проверять": "Qaysi tizimni tekshirish kerakligini aniqlab bo'lmaydi",
+    "Проверьте правильность номера заявки": "Ariza raqami to'g'riligini tekshiring",
+    "Если номер верный — обратитесь к оператору": "Raqam to'g'ri bo'lsa, operatorga murojaat qiling",
+    "Проверить номер заявки; если он верный — обратиться к оператору": "Ariza raqamini tekshirish; to'g'ri bo'lsa operatorga murojaat qilish",
+    "Заявка не найдена в Smartup": "Ariza Smartupda topilmadi",
+    "Заявка отменена": "Ariza bekor qilingan",
+    "Проверки WMS и бухгалтерии не требуются": "WMS va buxgalteriyani tekshirish talab etilmaydi",
+    "По вопросам отмены обратитесь к оператору": "Bekor qilish bo'yicha operatorga murojaat qiling",
+    "Документ не найден в бухгалтерии": "Hujjat buxgalteriyada topilmadi",
+    "Документ в бухгалтерии не проведён": "Hujjat buxgalteriyada o'tkazilmagan",
+    "Бухгалтерия: документ проведён": "Buxgalteriya: hujjat o'tkazilgan",
+    "Бухгалтерия: документ не проведён": "Buxgalteriya: hujjat o'tkazilmagan",
+    "Не удалось проверить статус ЭСФ": "EHF holatini tekshirib bo'lmadi",
+    "Повторить проверку или обратиться в бухгалтерию": "Tekshiruvni takrorlash yoki buxgalteriyaga murojaat qilish",
+    "Повторите проверку или обратитесь в бухгалтерию": "Tekshiruvni takrorlang yoki buxgalteriyaga murojaat qiling",
+    "Обратитесь в бухгалтерию": "Buxgalteriyaga murojaat qiling",
+    "ЭСФ не подписана": "EHF imzolanmagan",
+    "Проверка договора не выполнена": "Shartnoma tekshiruvi bajarilmadi",
+    "Договор в документе не заполнен": "Hujjatdagi shartnoma to'ldirilmagan",
+    "Активный договор не найден": "Faol shartnoma topilmadi",
+    "Проверка договора": "Shartnomani tekshirish",
+    "Корреспондент заполнен": "Korrespondent to'ldirilgan",
+    "Корреспондент не заполнен": "Korrespondent to'ldirilmagan",
+    "Договор в документе": "Hujjatdagi shartnoma",
+    "Активный договор": "Faol shartnoma",
+    "Договоры совпадают": "Shartnomalar mos",
+    "Договоры не совпадают": "Shartnomalar mos emas",
+    "Договор: соответствует активному": "Shartnoma: faol shartnomaga mos",
+    "Договор: не соответствует активному": "Shartnoma: faol shartnomaga mos emas",
+    "Договор: проверить не удалось": "Shartnomani tekshirib bo'lmadi",
+    "Не удалось проверить договор": "Shartnomani tekshirib bo'lmadi",
+    "Для текущей стадии правило проверки не настроено": "Joriy bosqich uchun tekshiruv qoidasi sozlanmagan",
+    "Расходный ордер не найден": "Chiqim orderi topilmadi",
+    "расходный ордер найден": "chiqim orderi topildi",
+    "Сборка товара не завершена": "Tovar yig'imi yakunlanmagan",
+    "БЯС не выбрана": "BYAS tanlanmagan",
+    "БЯС найдена": "BYAS topildi",
+    "Сборка завершена": "Yig'ish yakunlandi",
+    "Серии Smartup и WMS не совпадают": "Smartup va WMS seriyalari mos emas",
+    "Серии Smartup и WMS совпадают": "Smartup va WMS seriyalari mos",
+    "Несобранных позиций": "Yig'ilmagan pozitsiyalar",
+    "Товаров с расхождениями": "Tafovutli tovarlar",
+    "Позиций в корзине": "Savatdagi pozitsiyalar",
+    "таблица ниже": "jadval quyida",
+    "WMS не вернула список несобранных товаров": "WMS yig'ilmagan tovarlar ro'yxatini bermadi",
+    "WMS не вернула состав корзины": "WMS savat tarkibini bermadi",
+    "WMS не вернула состав сборки": "WMS yig'im tarkibini bermadi",
+    "WMS не вернула логическое поле": "WMS mantiqiy maydonni bermadi",
+    "WMS не вернула корректное числовое поле": "WMS to'g'ri raqamli maydonni bermadi",
+    "WMS вернула неверный тип": "WMS noto'g'ri turdagi qiymatni berdi",
+    "WMS вернула неверный формат": "WMS noto'g'ri formatni berdi",
+    "WMS вернула некорректные строки": "WMS noto'g'ri qatorlarni berdi",
+    "ответ WMS не является объектом": "WMS javobi obyekt emas",
+    "ответ JSON не является объектом": "JSON javobi obyekt emas",
+    "неверный или пустой URL": "URL noto'g'ri yoki bo'sh",
+    "ошибка запроса": "so'rov xatosi",
+    "Smartup не вернул товары заявки": "Smartup ariza tovarlarini bermadi",
+    "Smartup вернул пустой список товаров": "Smartup bo'sh tovarlar ro'yxatini berdi",
+    "В Smartup есть товар без product_code": "Smartupda product_codesiz tovar bor",
+    "В Smartup не указана серия": "Smartupda seriya ko'rsatilmagan",
+    "В Smartup не указано количество": "Smartupda miqdor ko'rsatilmagan",
+    "В WMS есть строка сборки без product_code": "WMS yig'imida product_codesiz qator bor",
+    "В WMS не указана серия": "WMSda seriya ko'rsatilmagan",
+    "В WMS не указано количество": "WMSda miqdor ko'rsatilmagan",
+    "WMS: расходный ордер найден": "WMS: chiqim orderi topildi",
+    "WMS: расходный ордер не найден": "WMS: chiqim orderi topilmadi",
+    "Не удалось проверить WMS": "WMSni tekshirib bo'lmadi",
+    "Нет в сборке": "Yig'imda yo'q",
+    "Лишняя серия в сборке": "Yig'imdagi ortiqcha seriya",
+    "Количество не совпало": "Miqdor mos emas",
+    "ожидалось": "kutilgan",
+    "количество": "miqdor",
+    "серия": "seriya",
+    "Ещё расхождений": "Yana tafovutlar",
+    "Документ проведён": "Hujjat o'tkazildi",
+    "Документ не проведён": "Hujjat o'tkazilmadi",
+    "документ найден": "hujjat topildi",
+    "документ не найден": "hujjat topilmadi",
+    "Ожидает подписи клиента": "Mijoz imzosini kutmoqda",
+    "Подписан клиентом": "Mijoz tomonidan imzolangan",
+    "Подписан": "Imzolangan",
+    "Отклонён": "Rad etilgan",
+    "Отклонен": "Rad etilgan",
+    "ЭСФ": "EHF",
+    "Заявка": "Ariza",
+    "Smartup: найдена": "Smartup: topildi",
+    "Smartup: заявка найдена": "Smartup: ariza topildi",
+    "Smartup: заявка не найдена": "Smartup: ariza topilmadi",
+    "Стадия заявки": "Ariza bosqichi",
+    "Дата заявки": "Ariza sanasi",
+    "Статус": "Holat",
+    "Дата": "Sana",
+    "Код склада Smartup": "Smartup ombor kodi",
+    "Склад": "Ombor",
+    "Регион": "Hudud",
+    "Ответственный": "Mas'ul",
+    "Причина": "Sabab",
+    "Не проверено": "Tekshirilmadi",
+    "Что делать": "Nima qilish kerak",
+    "ИТОГ: ЗАЯВКА ОТМЕНЕНА": "YAKUN: ARIZA BEKOR QILINGAN",
+    "ИТОГ: ОШИБОК НЕ НАЙДЕНО": "YAKUN: XATOLAR TOPILMADI",
+    "ИТОГ: ЕСТЬ ПРОБЛЕМА": "YAKUN: MUAMMO BOR",
+    "ИТОГ: ПРОВЕРКА НЕ ЗАВЕРШЕНА": "YAKUN: TEKSHIRUV YAKUNLANMADI",
+    "Проверено": "Tekshirildi",
+    "Время проверки": "Tekshiruv vaqti",
+    "Результат взят из кеша": "Natija keshdan olindi",
+    "Черновик": "Qoralama",
+    "Отменён": "Bekor qilingan",
+    "Архивирован": "Arxivlangan",
+    "Новый": "Yangi",
+    "В обработке": "Qayta ishlanmoqda",
+    "В ожидании": "Kutilmoqda",
+    "Отгружен": "Jo'natilgan",
+    "Доставлен": "Yetkazilgan",
+    "Статус не указан": "Holat ko'rsatilmagan",
+    "Неизвестный статус": "Noma'lum holat",
+    "Товар без наименования": "Nomsiz tovar",
+    "не указано": "ko'rsatilmagan",
+    "Состояние интеграций": "Integratsiyalar holati",
+    "Недоступно систем": "Ishlamayotgan tizimlar",
+    "Бухгалтерия": "Buxgalteriya",
+    "TMS недоступна": "TMS ishlamayapti",
+    "Водитель не назначен": "Haydovchi tayinlanmagan",
+    "Водитель": "Haydovchi",
+    "ТТН отправлена": "TTN yuborildi",
+    "ТТН не отправлена": "TTN yuborilmadi",
+    "Без названия": "Nomsiz",
+    "внутренняя ошибка": "ichki xato",
+    "сервер не ответил вовремя": "server o'z vaqtida javob bermadi",
+    "нет соединения с сервером": "server bilan aloqa yo'q",
+    "неверный логин или пароль": "login yoki parol noto'g'ri",
+    "доступ запрещён": "kirish taqiqlangan",
+    "неправильный URL или сервис не опубликован": "URL noto'g'ri yoki servis e'lon qilinmagan",
+    "внутренняя ошибка HTTP-сервиса": "HTTP servisning ichki xatosi",
+    "сервер вернул страницу вместо JSON": "server JSON o'rniga sahifa qaytardi",
+    "Проверка завершилась ошибкой": "Tekshiruv xato bilan yakunlandi",
+    "Не определён": "Aniqlanmagan",
+    "Отчёт о работе бота за": "Bot ishlashi bo'yicha hisobot:",
+    "Период с": "Boshlanish davri",
+    "Всего проверок": "Jami tekshiruvlar",
+    "Уникальных пользователей": "Noyob foydalanuvchilar",
+    "Уникальных заявок": "Noyob arizalar",
+    "Без ошибок": "Xatosiz",
+    "С проблемами": "Muammoli",
+    "Не завершены": "Yakunlanmagan",
+    "Отменённые заявки": "Bekor qilingan arizalar",
+    "Стадии заявок": "Ariza bosqichlari",
+    "Самые активные пользователи": "Eng faol foydalanuvchilar",
+    " дн.": " kun",
+    "бухгалтерия": "buxgalteriya",
+    "оператор": "operator",
+    "склад": "ombor",
+    "администратор интеграции": "integratsiya administratori",
+    "администратор бота": "bot administratori",
+    " ч.": " soat",
+    " сек.": " soniya",
+}
+
+
+def localize_text(value, language):
+    text = str(value)
+    if normalized_language(language) != "uz":
+        return text
+    for source in sorted(UZ_REPLACEMENTS, key=len, reverse=True):
+        text = text.replace(source, UZ_REPLACEMENTS[source])
+    return text
 
 
 class JsonUserStore:
@@ -170,6 +448,31 @@ class JsonUserStore:
             stream.write("\n")
         temp_path.replace(self.path)
 
+    def save_check_event(self, event):
+        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        with AUDIT_LOCK:
+            with AUDIT_PATH.open("a", encoding="utf-8") as stream:
+                stream.write(line)
+
+    def get_check_events(self, since):
+        if not AUDIT_PATH.exists():
+            return []
+        events = []
+        with AUDIT_LOCK:
+            lines = AUDIT_PATH.read_text(encoding="utf-8").splitlines()
+        for line in lines:
+            try:
+                event = json.loads(line)
+                checked_at = datetime.fromisoformat(str(event.get("checked_at") or ""))
+                if checked_at.tzinfo is None:
+                    checked_at = checked_at.replace(tzinfo=timezone.utc)
+                if checked_at >= since:
+                    events.append(event)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return events
+
 
 class PostgresUserStore:
     """Хранилище пользователей для production: PostgreSQL."""
@@ -191,6 +494,25 @@ class PostgresUserStore:
             registered_at       TIMESTAMP NOT NULL
         )
     """
+    CHECK_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS check_events (
+            id                  BIGSERIAL PRIMARY KEY,
+            checked_at          TIMESTAMPTZ NOT NULL,
+            telegram_user_id    BIGINT,
+            chat_id             BIGINT,
+            username            TEXT NOT NULL DEFAULT '',
+            full_name           TEXT NOT NULL DEFAULT '',
+            language            TEXT NOT NULL DEFAULT 'ru',
+            document_number     TEXT NOT NULL,
+            smartup_status_code TEXT NOT NULL DEFAULT '',
+            smartup_status      TEXT NOT NULL DEFAULT '',
+            outcome             TEXT NOT NULL,
+            elapsed_seconds     DOUBLE PRECISION NOT NULL DEFAULT 0,
+            from_cache          BOOLEAN NOT NULL DEFAULT FALSE,
+            warehouses          TEXT[] NOT NULL DEFAULT '{}',
+            problem_reasons     TEXT[] NOT NULL DEFAULT '{}'
+        )
+    """
 
     def __init__(self):
         import psycopg
@@ -208,6 +530,8 @@ class PostgresUserStore:
         }
         self.conn = None
         self._execute(self.SCHEMA)
+        self._execute(self.CHECK_SCHEMA)
+        self._execute("CREATE INDEX IF NOT EXISTS check_events_checked_at_idx ON check_events (checked_at)")
 
     def describe(self):
         if self.conninfo:
@@ -255,6 +579,42 @@ class PostgresUserStore:
             user,
         )
 
+    def save_check_event(self, event):
+        columns = (
+            "checked_at", "telegram_user_id", "chat_id", "username", "full_name", "language",
+            "document_number", "smartup_status_code", "smartup_status", "outcome",
+            "elapsed_seconds", "from_cache", "warehouses", "problem_reasons",
+        )
+        self._execute(
+            f"INSERT INTO check_events ({', '.join(columns)}) VALUES "
+            f"({', '.join(f'%({name})s' for name in columns)})",
+            event,
+        )
+
+    def get_check_events(self, since):
+        for attempt in (1, 2):
+            try:
+                if self.conn is None or self.conn.closed:
+                    self.conn = self.psycopg.connect(
+                        self.conninfo, autocommit=True, row_factory=self.row_factory, **self.params
+                    )
+                with self.conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT checked_at, telegram_user_id, chat_id, username, full_name, language, "
+                        "document_number, smartup_status_code, smartup_status, outcome, elapsed_seconds, "
+                        "from_cache, warehouses, problem_reasons "
+                        "FROM check_events WHERE checked_at >= %s ORDER BY checked_at",
+                        (since,),
+                    )
+                    return [dict(row) for row in cursor.fetchall()]
+            except self.psycopg.OperationalError:
+                if self.conn is not None:
+                    self.conn.close()
+                self.conn = None
+                if attempt == 2:
+                    raise
+        return []
+
 
 def create_user_store():
     if APP_ENV == "production":
@@ -268,6 +628,11 @@ def get_registered_user(user_id):
     if user_id is None:
         return None
     return USER_STORE.get_user(user_id)
+
+
+def get_user_language(user_id):
+    user = get_registered_user(user_id)
+    return normalized_language(user.get("language") if user else "ru")
 
 
 def save_registered_user(message, registration):
@@ -331,18 +696,25 @@ def valid_position(value):
     return normalized
 
 
-def start_registration(message):
+def start_registration(message, default_language="ru"):
+    default_language = normalized_language(default_language)
     chat = message.get("chat", {})
     sender = message.get("from", {})
     chat_id = chat.get("id")
     user_id = sender.get("id")
     if chat_id is None or user_id is None:
-        return "⚠️ Не удалось определить пользователя.", main_keyboard(False)
+        return (
+            "⚠️ Foydalanuvchini aniqlab bo'lmadi." if default_language == "uz"
+            else "⚠️ Не удалось определить пользователя."
+        ), main_keyboard(False, default_language)
     if str(chat.get("type") or "") != "private":
         return (
-            "👤 Регистрация выполняется в личном чате с ботом.\n\n"
-            "Откройте бота в личных сообщениях и отправьте /start.",
-            main_keyboard(False),
+            ("👤 Ro'yxatdan o'tish bot bilan shaxsiy chatda amalga oshiriladi.\n\n"
+             "Botni shaxsiy xabarlarda ochib, /start yuboring."
+             if default_language == "uz" else
+             "👤 Регистрация выполняется в личном чате с ботом.\n\n"
+             "Откройте бота в личных сообщениях и отправьте /start."),
+            main_keyboard(False, default_language),
         )
 
     REGISTRATION[str(user_id)] = {
@@ -371,10 +743,13 @@ def process_registration_message(message):
 
     text = str(message.get("text") or "").strip()
     step = state.get("step")
+    language = normalized_language(state.get("language"))
 
-    if text == BUTTON_CANCEL or text.lower() == "/cancel":
+    if is_button(text, "cancel") or text.lower() == "/cancel":
         REGISTRATION.pop(key, None)
-        return "Регистрация отменена.", main_keyboard(False)
+        return (
+            "Ro'yxatdan o'tish bekor qilindi." if language == "uz" else "Регистрация отменена."
+        ), main_keyboard(False, language)
 
     if step == "language":
         if text == BUTTON_LANG_RU:
@@ -386,8 +761,6 @@ def process_registration_message(message):
             state["step"] = "full_name"
             return "👤 F.I.Sh ni kiriting", {"remove_keyboard": True}
         return "Выберите язык кнопкой ниже. / Quyidagi tugma orqali tilni tanlang.", language_keyboard()
-
-    language = state.get("language") or "ru"
 
     if step == "full_name":
         full_name = valid_full_name(text)
@@ -448,7 +821,8 @@ def process_registration_message(message):
             save_registered_user(message, state)
         except Exception as error:
             return (
-                f"⚠️ Не удалось сохранить регистрацию: {error}",
+                (f"⚠️ Ro'yxatdan o'tishni saqlab bo'lmadi: {error}" if language == "uz"
+                 else f"⚠️ Не удалось сохранить регистрацию: {error}"),
                 phone_keyboard(language),
             )
 
@@ -469,10 +843,14 @@ def process_registration_message(message):
                 f"Телефон: {', '.join(phones)}\n\n"
                 "Теперь вы можете пользоваться ботом."
             )
-        return answer, main_keyboard(True)
+        return answer, main_keyboard(True, language)
 
     REGISTRATION.pop(key, None)
-    return "Регистрация сброшена. Нажмите /start и попробуйте ещё раз.", main_keyboard(False)
+    return (
+        "Ro'yxatdan o'tish bekor qilindi. /start ni bosib, qayta urinib ko'ring."
+        if language == "uz" else
+        "Регистрация сброшена. Нажмите /start и попробуйте ещё раз."
+    ), main_keyboard(False, language)
 
 def load_config():
     if not CONFIG_PATH.exists():
@@ -626,6 +1004,23 @@ def display_quantity(value):
     return format(number.normalize(), "f")
 
 
+def display_order_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        return datetime.fromisoformat(candidate).strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        pass
+    for pattern in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"):
+        try:
+            return datetime.strptime(text, pattern).strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            continue
+    return text
+
+
 def item_label(item):
     name = str(item.get("product_name") or "").strip()
     code = str(item.get("product_code") or "").strip()
@@ -657,14 +1052,15 @@ def compare_series(smartup, wms):
             "available": False,
             "matches": False,
             "issues": [wms.get("series_data_error") or "WMS не вернула состав сборки"],
+            "items": [],
         }
 
     order = smartup.get("order", {})
     products = order.get("order_products", []) if isinstance(order, dict) else []
     if not isinstance(products, list):
-        return {"available": False, "matches": False, "issues": ["Smartup не вернул товары заявки"]}
+        return {"available": False, "matches": False, "issues": ["Smartup не вернул товары заявки"], "items": []}
     if not products:
-        return {"available": False, "matches": False, "issues": ["Smartup вернул пустой список товаров"]}
+        return {"available": False, "matches": False, "issues": ["Smartup вернул пустой список товаров"], "items": []}
 
     expected = {}
     actual = {}
@@ -716,26 +1112,36 @@ def compare_series(smartup, wms):
         labels.setdefault(key, (code, series, name))
 
     issues = list(dict.fromkeys(data_issues))
+    mismatch_items = []
     for key in sorted(set(expected) | set(actual)):
         code, series, name = labels[key]
         product = f"{name} ({code})" if name else code
         expected_quantity = expected.get(key, Decimal(0))
         actual_quantity = actual.get(key, Decimal(0))
         if key not in actual:
-            issues.append(
-                f"Нет в сборке: {product}, серия {series}, ожидалось {display_quantity(expected_quantity)}"
-            )
+            problem = "Нет в сборке"
+            issues.append(f"{problem}: {product}, серия {series}, ожидалось {display_quantity(expected_quantity)}")
         elif key not in expected:
-            issues.append(
-                f"Лишняя серия в сборке: {product}, серия {series}, количество {display_quantity(actual_quantity)}"
-            )
+            problem = "Лишняя серия в сборке"
+            issues.append(f"{problem}: {product}, серия {series}, количество {display_quantity(actual_quantity)}")
         elif expected_quantity != actual_quantity:
+            problem = "Количество не совпало"
             issues.append(
-                f"Количество не совпало: {product}, серия {series}; "
-                f"Smartup {display_quantity(expected_quantity)}, WMS {display_quantity(actual_quantity)}"
+                f"{problem}: {product}, серия {series}; Smartup {display_quantity(expected_quantity)}, "
+                f"WMS {display_quantity(actual_quantity)}"
             )
+        else:
+            continue
+        mismatch_items.append({
+            "product_name": name or "Товар без наименования",
+            "product_code": code,
+            "series": series,
+            "smartup_quantity": display_quantity(expected_quantity) if key in expected else "—",
+            "wms_quantity": display_quantity(actual_quantity) if key in actual else "—",
+            "problem": problem,
+        })
 
-    return {"available": True, "matches": not issues, "issues": issues}
+    return {"available": True, "matches": not issues, "issues": issues, "items": mismatch_items}
 
 
 def format_wms(wms, status_code, responsible="", series_check=None):
@@ -783,6 +1189,9 @@ def format_wms(wms, status_code, responsible="", series_check=None):
                 warehouse_contact = True
             elif series_check and not series_check.get("matches"):
                 lines.append("❌ Серии Smartup и WMS не совпадают")
+                mismatch_items = series_check.get("items", [])
+                if mismatch_items:
+                    lines.append(f"📦 Товаров с расхождениями: {len(mismatch_items)} — таблица ниже")
                 for issue in series_check.get("issues", [])[:8]:
                     lines.append(f"   • {issue}")
                 extra = len(series_check.get("issues", [])) - 8
@@ -1063,29 +1472,41 @@ def table_cell(text, header=False, align="left"):
     return cell
 
 
-def build_items_rich_message(title, items, quantity_field, quantity_title):
-    cells = [[
-        table_cell("Наименование", True),
-        table_cell("Код", True, "center"),
-        table_cell("Серия", True, "center"),
-        table_cell(quantity_title, True, "center"),
-    ]]
+def table_columns(table):
+    if table.get("columns"):
+        return table["columns"]
+    language = normalized_language(table.get("language"))
+    return [
+        {"field": "product_name", "title": "Nomi" if language == "uz" else "Наименование"},
+        {"field": "product_code", "title": "Kod" if language == "uz" else "Код", "align": "center"},
+        {"field": "series", "title": "Seriya" if language == "uz" else "Серия", "align": "center"},
+        {"field": table["quantity_field"], "title": table["quantity_title"], "align": "right", "quantity": True},
+    ]
 
-    for item in items:
+
+def table_display_value(item, column):
+    value = item.get(column["field"])
+    if column.get("quantity"):
         try:
-            quantity = display_quantity(decimal_value(item.get(quantity_field)))
+            return display_quantity(decimal_value(value))
         except (InvalidOperation, ValueError):
-            quantity = str(item.get(quantity_field) or "—").strip()
+            pass
+    return str(value if value not in (None, "") else "—").strip()
+
+
+def build_items_rich_message(table):
+    columns = table_columns(table)
+    cells = [[table_cell(column["title"], True, column.get("align", "left")) for column in columns]]
+
+    for item in table["items"]:
         cells.append([
-            table_cell(item.get("product_name") or "Товар без наименования"),
-            table_cell(item.get("product_code"), align="center"),
-            table_cell(item.get("series"), align="center"),
-            table_cell(quantity, align="right"),
+            table_cell(table_display_value(item, column), align=column.get("align", "left"))
+            for column in columns
         ])
 
     return {
         "blocks": [
-            {"type": "heading", "text": title, "size": 4},
+            {"type": "heading", "text": table["title"], "size": 4},
             {
                 "type": "table",
                 "cells": cells,
@@ -1098,7 +1519,8 @@ def build_items_rich_message(title, items, quantity_field, quantity_title):
     }
 
 
-def collect_wms_tables(results):
+def collect_wms_tables(results, language="ru"):
+    language = normalized_language(language)
     tables = []
     for region in results.get("regions", []):
         if not region.get("selected", True):
@@ -1112,25 +1534,50 @@ def collect_wms_tables(results):
         basket = wms.get("basket_items", [])
         if unassembled:
             tables.append({
-                "title": f"📦 Не собрано{suffix}",
+                "title": (f"📦 Yig'ilmagan{suffix}" if language == "uz" else f"📦 Не собрано{suffix}"),
                 "items": unassembled,
                 "quantity_field": "remaining_quantity",
-                "quantity_title": "Не собрано",
+                "quantity_title": "Yig'ilmagan" if language == "uz" else "Не собрано",
+                "language": language,
             })
         if basket:
             tables.append({
-                "title": f"🧺 Товары в корзине{suffix}",
+                "title": (f"🧺 Savatdagi tovarlar{suffix}" if language == "uz" else f"🧺 Товары в корзине{suffix}"),
                 "items": basket,
                 "quantity_field": "basket_quantity",
-                "quantity_title": "В корзине",
+                "quantity_title": "Savatda" if language == "uz" else "В корзине",
+                "language": language,
+            })
+        series_check = region.get("series_check") or {}
+        mismatch_items = series_check.get("items", [])
+        if mismatch_items:
+            tables.append({
+                "title": (
+                    f"❌ Smartup va WMS tafovutlari{suffix}" if language == "uz"
+                    else f"❌ Расхождения Smartup и WMS{suffix}"
+                ),
+                "items": mismatch_items,
+                "language": language,
+                "columns": [
+                    {"field": "product_name", "title": "Nomi" if language == "uz" else "Наименование"},
+                    {"field": "product_code", "title": "Kod" if language == "uz" else "Код", "align": "center"},
+                    {"field": "series", "title": "Seriya" if language == "uz" else "Серия", "align": "center"},
+                    {"field": "smartup_quantity", "title": "Smartup", "align": "right"},
+                    {"field": "wms_quantity", "title": "WMS", "align": "right"},
+                    {"field": "problem", "title": "Muammo" if language == "uz" else "Проблема"},
+                ],
             })
     return tables
 
 
 def send_items_table(token, chat_id, table, reply_parameters=None):
-    rich_message = build_items_rich_message(
-        table["title"], table["items"], table["quantity_field"], table["quantity_title"]
-    )
+    if normalized_language(table.get("language")) == "uz":
+        table = dict(table)
+        table["items"] = [
+            {key: (localize_text(value, "uz") if key == "problem" else value) for key, value in item.items()}
+            for item in table["items"]
+        ]
+    rich_message = build_items_rich_message(table)
     params = {
         "chat_id": chat_id,
         "rich_message": json.dumps(rich_message, ensure_ascii=False),
@@ -1142,11 +1589,15 @@ def send_items_table(token, chat_id, table, reply_parameters=None):
         return
     except Exception:
         lines = [table["title"] + ":"]
-        lines.extend(format_wms_items(table["items"], table["quantity_field"], limit=20))
-        fallback = {"chat_id": chat_id, "text": "\n".join(lines)}
-        if reply_parameters:
-            fallback["reply_parameters"] = reply_parameters
-        telegram_call(token, "sendMessage", fallback)
+        columns = table_columns(table)
+        for item in table["items"]:
+            values = [f"{column['title']}: {table_display_value(item, column)}" for column in columns]
+            lines.append("• " + "; ".join(values))
+        for chunk in split_telegram_text("\n".join(lines)):
+            fallback = {"chat_id": chat_id, "text": chunk}
+            if reply_parameters:
+                fallback["reply_parameters"] = reply_parameters
+            telegram_call(token, "sendMessage", fallback)
 
 
 def bool_value(data, *names):
@@ -1229,6 +1680,123 @@ def add_unique(items, value):
         items.append(value)
 
 
+def invoice_status_icon(invoice_status, invoice_signed):
+    if invoice_signed:
+        return "✅"
+    status = str(invoice_status or "").strip().casefold()
+    error_markers = (
+        "ошиб", "отклон", "отмен", "аннулир", "отказ",
+        "не принят", "не подписан",
+    )
+    return "❌" if any(marker in status for marker in error_markers) else "⚠️"
+
+
+def format_accounting(accounting):
+    """Format the accounting service response and keep its business rules in one place."""
+    lines = []
+    problem_reasons = []
+
+    if accounting.get("_error"):
+        return {
+            "lines": [
+                f"❌ Бухгалтерия недоступна: {describe_error(accounting['_error'])}",
+                "➡️ Не удалось проверить статус ЭСФ",
+            ],
+            "problems": 0,
+            "unavailable": 1,
+            "problem_reasons": [],
+            "unavailable_reasons": ["Бухгалтерия недоступна, статус ЭСФ не проверен"],
+            "required_actions": ["Повторите проверку или обратитесь в бухгалтерию"],
+            "responsible_people": [],
+        }
+
+    document_found = bool_value(accounting, "document_found", "order_found")
+    document_posted = bool_value(accounting, "document_posted")
+    invoice_signed = bool_value(accounting, "invoice_sent", "invoice_signed")
+    invoice_status = str(accounting.get("invoice_status") or "").strip()
+    accounting_completed = document_found and document_posted and invoice_signed
+
+    if not document_found:
+        lines.append("❌ Бухгалтерия: документ не найден")
+    elif document_posted:
+        lines.append("✅ Бухгалтерия: документ проведён")
+    else:
+        lines.append("❌ Бухгалтерия: документ не проведён")
+
+    invoice_display = invoice_status or ("Подписан" if invoice_signed else "не найдена")
+    invoice_icon = invoice_status_icon(invoice_status, invoice_signed)
+    lines.append(f"{invoice_icon} ЭСФ: {invoice_display}")
+
+    if accounting_completed:
+        return {
+            "lines": lines,
+            "problems": 0,
+            "unavailable": 0,
+            "problem_reasons": [],
+            "unavailable_reasons": [],
+            "required_actions": [],
+            "responsible_people": [],
+        }
+
+    if not document_found:
+        add_unique(problem_reasons, "Документ не найден в бухгалтерии")
+    elif not document_posted:
+        add_unique(problem_reasons, "Документ в бухгалтерии не проведён")
+    if not invoice_signed:
+        invoice_reason = "ЭСФ не подписана"
+        if invoice_status:
+            invoice_reason += f" (статус: {invoice_status})"
+        add_unique(problem_reasons, invoice_reason)
+
+        # The current 1C contract checks the contract only while the invoice is unsigned.
+        contract_check_required = bool_value(accounting, "contract_check_required")
+        if contract_check_required:
+            correspondent_filled = bool_value(accounting, "correspondent_filled")
+            document_contract_filled = bool_value(accounting, "document_contract_filled")
+            active_contract_found = bool_value(accounting, "active_contract_found")
+            contract_matches = bool_value(accounting, "contract_matches")
+            document_contract = str(accounting.get("document_contract") or "").strip()
+            active_contract = str(accounting.get("active_contract") or "").strip()
+
+            if not correspondent_filled:
+                lines.append("❌ Корреспондент не заполнен")
+                add_unique(problem_reasons, "Корреспондент не заполнен")
+            if not document_contract_filled:
+                add_unique(problem_reasons, "Договор в документе не заполнен")
+            if not active_contract_found:
+                add_unique(problem_reasons, "Активный договор не найден")
+            contract_ok = (
+                correspondent_filled and document_contract_filled
+                and active_contract_found and contract_matches
+            )
+            if contract_ok:
+                lines.append("✅ Договор: соответствует активному")
+            else:
+                if not document_contract_filled:
+                    lines.append("❌ Договор в документе не заполнен")
+                elif not active_contract_found:
+                    lines.append("❌ Активный договор не найден")
+                elif not contract_matches:
+                    lines.append("❌ Договор: не соответствует активному")
+                lines.append(f"📄 Договор в документе: {document_contract or '—'}")
+                lines.append(f"📋 Активный договор: {active_contract or '—'}")
+            if document_contract_filled and active_contract_found and not contract_matches:
+                add_unique(problem_reasons, "Договоры не совпадают")
+        else:
+            lines.append("⚠️ Договор: проверить не удалось")
+            add_unique(problem_reasons, "Не удалось проверить договор")
+
+    return {
+        "lines": lines,
+        "problems": 1,
+        "unavailable": 0,
+        "problem_reasons": problem_reasons,
+        "unavailable_reasons": [],
+        "required_actions": ["Обратитесь в бухгалтерию"],
+        "responsible_people": [],
+    }
+
+
 def wms_summary(wms, status_code, series_check=None, responsible=""):
     normalized = normalize_wms(wms)
     owner = str(responsible or "склад").strip()
@@ -1290,18 +1858,18 @@ def format_result(doc_number, results):
     else:
         status_code = str(smartup.get("status_code") or "").strip().upper()
         status_name = str(smartup.get("status") or "Статус не указан")
-        lines.append("✅ Smartup: заявка найдена")
-        lines.append(f"📌 Стадия заявки: {status_name}")
-        order_date = str(smartup.get("order", {}).get("deal_time") or "").strip()
+        lines.append("✅ Smartup: найдена")
+        lines.append(f"📌 Статус: {status_name}")
+        order_date = display_order_datetime(smartup.get("order", {}).get("deal_time"))
         if order_date:
-            lines.append(f"📅 Дата заявки: {order_date}")
+            lines.append(f"📅 Дата: {order_date}")
 
         warehouse_codes = results.get("warehouse_codes", [])
         warehouse_names = results.get("warehouse_names", [])
         if warehouse_names:
-            lines.append(f"🏬 Склад: {', '.join(warehouse_names)}")
+            lines.append(f"🏢 Склад: {', '.join(warehouse_names)}")
         elif warehouse_codes:
-            lines.append(f"🏬 Код склада Smartup: {', '.join(warehouse_codes)}")
+            lines.append(f"🏢 Код склада Smartup: {', '.join(warehouse_codes)}")
 
         if status_code == "C":
             lines.append("🚫 Заявка отменена")
@@ -1375,35 +1943,18 @@ def format_result(doc_number, results):
                     add_unique(responsible_people, owner)
 
         elif status_code == "A":
-            accounting = results.get("accounting", {})
-            if accounting.get("_error"):
-                lines.append(f"❌ Бухгалтерия недоступна: {describe_error(accounting['_error'])}")
-                lines.append("➡️ Не удалось проверить отправку ЭСФ")
-                unavailable += 1
-                add_unique(unavailable_reasons, "Бухгалтерия недоступна, статус ЭСФ не проверен")
-                add_unique(required_actions, "Повторить проверку или обратиться в бухгалтерию")
-                add_unique(responsible_people, "бухгалтерия")
-            else:
-                document_found = bool_value(accounting, "document_found", "order_found")
-                document_posted = bool_value(accounting, "document_posted")
-                invoice_sent = bool_value(accounting, "invoice_sent")
-                lines.append("✅ Бухгалтерия: документ найден" if document_found else "❌ Бухгалтерия: документ не найден")
-                if document_found:
-                    lines.append("✅ Документ проведён" if document_posted else "⚠️ Документ не проведён")
-                lines.append("✅ ЭСФ отправлена" if invoice_sent else "❌ ЭСФ не отправлена")
-                if document_found and document_posted and invoice_sent:
-                    lines.append("✅ Заявка готова: ЭСФ отправлена")
-                else:
-                    lines.append("➡️ Обратитесь в бухгалтерию")
-                    problems += 1
-                    if not document_found:
-                        add_unique(problem_reasons, "Документ не найден в бухгалтерии")
-                    elif not document_posted:
-                        add_unique(problem_reasons, "Документ в бухгалтерии не проведён")
-                    if not invoice_sent:
-                        add_unique(problem_reasons, "ЭСФ не отправлена")
-                    add_unique(required_actions, "Обратиться в бухгалтерию")
-                    add_unique(responsible_people, "бухгалтерия")
+            accounting_result = format_accounting(results.get("accounting", {}))
+            lines.extend(accounting_result["lines"])
+            problems += accounting_result["problems"]
+            unavailable += accounting_result["unavailable"]
+            for reason in accounting_result["problem_reasons"]:
+                add_unique(problem_reasons, reason)
+            for reason in accounting_result["unavailable_reasons"]:
+                add_unique(unavailable_reasons, reason)
+            for action in accounting_result["required_actions"]:
+                add_unique(required_actions, action)
+            for owner in accounting_result["responsible_people"]:
+                add_unique(responsible_people, owner)
 
         else:
             lines.append("⚠️ Для этой стадии правило проверки ещё не настроено")
@@ -1414,7 +1965,7 @@ def format_result(doc_number, results):
             add_unique(responsible_people, "администратор бота")
 
     elapsed = float(results.get("_elapsed", 0))
-    lines.extend(["", "━━━━━━━━━━━━━━"])
+    lines.append("")
     if cancelled and unavailable == 0:
         lines.append("ℹ️ ИТОГ: ЗАЯВКА ОТМЕНЕНА")
     elif problems == 0 and unavailable == 0:
@@ -1424,28 +1975,47 @@ def format_result(doc_number, results):
             lines.append("❌ ИТОГ: ЕСТЬ ПРОБЛЕМА")
         else:
             lines.append("⚠️ ИТОГ: ПРОВЕРКА НЕ ЗАВЕРШЕНА")
-        for reason in problem_reasons:
-            lines.append(f"🔎 Причина: {reason}")
         for reason in unavailable_reasons:
             lines.append(f"⚠️ Не проверено: {reason}")
         for action in required_actions:
-            lines.append(f"➡️ Что делать: {action}")
+            if action.startswith(("Обратитесь", "Повторите")):
+                lines.append(f"➡️ {action}")
+            else:
+                lines.append(f"➡️ Что делать: {action}")
         for owner in responsible_people:
             lines.append(f"👤 Ответственный: {owner}")
-    lines.append(f"Проверено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-    lines.append(f"Время проверки: {elapsed:.1f} сек.")
+    results["_summary"] = {
+        "outcome": (
+            "cancelled" if cancelled and unavailable == 0 else
+            "ok" if problems == 0 and unavailable == 0 else
+            "problem" if problems > 0 else "incomplete"
+        ),
+        "problem_reasons": problem_reasons + unavailable_reasons,
+        "smartup_status_code": str(smartup.get("status_code") or ""),
+        "smartup_status": str(smartup.get("status") or ""),
+        "warehouses": list(results.get("warehouse_names", [])),
+        "elapsed_seconds": elapsed,
+    }
+    lines.append(f"🕒 Проверено: {datetime.now(LOCAL_TIMEZONE).strftime('%d.%m.%Y %H:%M')}")
+    lines.append(f"⏱ {elapsed:.1f} сек.")
     return "\n".join(lines)
 
 
-def check_order(config, doc_number):
+def check_order(config, doc_number, language="ru"):
+    language = normalized_language(language)
     cache_seconds = int(config.get("cache_seconds", 30))
-    cached = CACHE.get(doc_number)
+    cache_key = (doc_number, language)
+    cached = CACHE.get(cache_key)
     if cached and time.time() - cached[0] < cache_seconds:
         cached_result = cached[1]
-        return {
+        result = {
             "text": cached_result["text"] + "\n♻️ Результат взят из кеша",
             "tables": cached_result.get("tables", []),
+            "summary": dict(cached_result.get("summary", {})),
+            "from_cache": True,
         }
+        result["text"] = localize_text(result["text"], language)
+        return result
 
     started = time.perf_counter()
     timeout = int(config.get("request_timeout_seconds", 20))
@@ -1553,9 +2123,14 @@ def check_order(config, doc_number):
                 item["series_check"] = compare_series(smartup, wms)
 
     results["_elapsed"] = time.perf_counter() - started
-    answer = format_result(doc_number, results)
-    result = {"text": answer, "tables": collect_wms_tables(results)}
-    CACHE[doc_number] = (time.time(), result)
+    answer = localize_text(format_result(doc_number, results), language)
+    result = {
+        "text": answer,
+        "tables": collect_wms_tables(results, language),
+        "summary": results.get("_summary", {}),
+        "from_cache": False,
+    }
+    CACHE[cache_key] = (time.time(), result)
     return result
 
 
@@ -1601,13 +2176,18 @@ def handle_callback(config, callback):
     callback_id = callback.get("id")
     if not callback_id:
         return
+    language = get_user_language(callback.get("from", {}).get("id"))
     try:
         telegram_call(
             config["telegram_bot_token"],
             "answerCallbackQuery",
             {
                 "callback_query_id": callback_id,
-                "text": "Ручное подтверждение больше не используется. Пройдите регистрацию через /start.",
+                "text": (
+                    "Qo'lda tasdiqlash endi ishlatilmaydi. /start orqali ro'yxatdan o'ting."
+                    if language == "uz" else
+                    "Ручное подтверждение больше не используется. Пройдите регистрацию через /start."
+                ),
                 "show_alert": "true",
             },
         )
@@ -1635,14 +2215,14 @@ def parse_document_numbers(text):
     return documents, invalid
 
 
-def user_mention_html(message):
+def user_mention_html(message, language="ru"):
     sender = message.get("from", {})
     user_id = sender.get("id")
     username = str(sender.get("username") or "").strip()
     first_name = str(sender.get("first_name") or "").strip()
     last_name = str(sender.get("last_name") or "").strip()
     name = f"@{username}" if username else " ".join(part for part in (first_name, last_name) if part)
-    name = name or "Пользователь"
+    name = name or ("Foydalanuvchi" if normalized_language(language) == "uz" else "Пользователь")
     if user_id is None:
         return html.escape(name)
     return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
@@ -1669,56 +2249,156 @@ def split_telegram_text(text, limit=4000):
     return chunks or [""]
 
 
-def check_orders(config, document_numbers):
+def check_orders(config, document_numbers, language="ru"):
     results = [None] * len(document_numbers)
     configured_workers = int(config.get("batch_workers", 3))
     workers = min(len(document_numbers), max(1, configured_workers))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        jobs = {pool.submit(check_order, config, number): index for index, number in enumerate(document_numbers)}
+        jobs = {
+            pool.submit(check_order, config, number, language): index
+            for index, number in enumerate(document_numbers)
+        }
         for job in as_completed(jobs):
             index = jobs[job]
             try:
                 results[index] = job.result()
             except Exception as error:
                 results[index] = {
-                    "text": (
+                    "text": localize_text((
                         f"Заявка {document_numbers[index]}\n\n"
                         f"❌ Проверка завершилась ошибкой: {describe_error(error)}"
-                    ),
+                    ), language),
                     "tables": [],
+                    "summary": {
+                        "outcome": "incomplete", "problem_reasons": [str(error)],
+                        "smartup_status_code": "", "smartup_status": "", "warehouses": [],
+                        "elapsed_seconds": 0,
+                    },
+                    "from_cache": False,
                 }
     return results
 
 
-def send_batch_check(config, message, document_numbers):
+def save_check_audit(message, document_number, result, language):
+    sender = message.get("from", {})
+    chat = message.get("chat", {})
+    registered = get_registered_user(sender.get("id")) or {}
+    summary = result.get("summary", {})
+    event = {
+        "checked_at": datetime.now(LOCAL_TIMEZONE).isoformat(timespec="seconds"),
+        "telegram_user_id": sender.get("id"),
+        "chat_id": chat.get("id"),
+        "username": str(sender.get("username") or ""),
+        "full_name": str(registered.get("full_name") or ""),
+        "language": normalized_language(language),
+        "document_number": str(document_number),
+        "smartup_status_code": str(summary.get("smartup_status_code") or ""),
+        "smartup_status": str(summary.get("smartup_status") or ""),
+        "outcome": str(summary.get("outcome") or "incomplete"),
+        "elapsed_seconds": float(summary.get("elapsed_seconds") or 0),
+        "from_cache": bool(result.get("from_cache")),
+        "warehouses": list(summary.get("warehouses") or []),
+        "problem_reasons": list(summary.get("problem_reasons") or []),
+    }
+    try:
+        USER_STORE.save_check_event(event)
+    except Exception:
+        logging.exception("audit_write_failed document=%s user_id=%s", document_number, sender.get("id"))
+    logging.info("check_event %s", json.dumps(event, ensure_ascii=False, default=str))
+
+
+def is_admin(config, chat_id, user_id):
+    configured = config.get("admin_chat_ids", [])
+    if not isinstance(configured, list):
+        configured = [configured]
+    allowed = {str(value) for value in configured}
+    return str(user_id) in allowed or str(chat_id) in allowed
+
+
+def build_report(days, language="ru"):
+    since = datetime.now(LOCAL_TIMEZONE) - timedelta(days=days)
+    events = USER_STORE.get_check_events(since)
+    outcome_counts = {"ok": 0, "problem": 0, "incomplete": 0, "cancelled": 0}
+    users = set()
+    documents = set()
+    statuses = {}
+    user_counts = {}
+    for event in events:
+        outcome = str(event.get("outcome") or "incomplete")
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        user_key = str(event.get("telegram_user_id") or event.get("username") or "unknown")
+        users.add(user_key)
+        documents.add(str(event.get("document_number") or ""))
+        user_name = str(event.get("full_name") or event.get("username") or user_key)
+        user_counts[user_name] = user_counts.get(user_name, 0) + 1
+        status = str(event.get("smartup_status") or "Не определён")
+        statuses[status] = statuses.get(status, 0) + 1
+
+    top_users = sorted(user_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    status_rows = sorted(statuses.items(), key=lambda item: (-item[1], item[0]))
+    lines = [
+        f"📊 Отчёт о работе бота за {days} дн.",
+        f"Период с: {since.strftime('%d.%m.%Y %H:%M')}",
+        "",
+        f"Всего проверок: {len(events)}",
+        f"Уникальных пользователей: {len(users)}",
+        f"Уникальных заявок: {len(documents)}",
+        f"✅ Без ошибок: {outcome_counts.get('ok', 0)}",
+        f"❌ С проблемами: {outcome_counts.get('problem', 0)}",
+        f"⚠️ Не завершены: {outcome_counts.get('incomplete', 0)}",
+        f"ℹ️ Отменённые заявки: {outcome_counts.get('cancelled', 0)}",
+    ]
+    if status_rows:
+        lines.extend(["", "Стадии заявок:"])
+        lines.extend(f"• {name}: {count}" for name, count in status_rows)
+    if top_users:
+        lines.extend(["", "Самые активные пользователи:"])
+        lines.extend(f"• {name}: {count}" for name, count in top_users)
+    return localize_text("\n".join(lines), language)
+
+
+def send_batch_check(config, message, document_numbers, language="ru"):
+    language = normalized_language(language)
     token = config["telegram_bot_token"]
     chat_id = message.get("chat", {}).get("id")
     message_id = message.get("message_id")
-    mention = user_mention_html(message)
+    mention = user_mention_html(message, language)
     count = len(document_numbers)
-    if count == 1:
+    if language == "uz":
+        request_word = "ta arizani"
+    elif count == 1:
         request_word = "заявку"
     elif 2 <= count <= 4:
         request_word = "заявки"
     else:
         request_word = "заявок"
-    preview = ", ".join(html.escape(number) for number in document_numbers)
     reply_parameters = None
     if message_id is not None:
         reply_parameters = json.dumps({"message_id": message_id, "allow_sending_without_reply": True})
 
-    progress_params = {
-        "chat_id": chat_id,
-        "text": f"🔎 {mention}, проверяю {count} {request_word}: {preview}",
-        "parse_mode": "HTML",
-    }
-    if reply_parameters:
-        progress_params["reply_parameters"] = reply_parameters
-    telegram_call(token, "sendMessage", progress_params)
+    progress_message = None
+    if count > 1:
+        progress_params = {
+            "chat_id": chat_id,
+            "text": (
+                f"🔎 {mention}, {count} {request_word} tekshiryapman…" if language == "uz"
+                else f"🔎 {mention}, проверяю {count} {request_word}…"
+            ),
+            "parse_mode": "HTML",
+        }
+        if reply_parameters:
+            progress_params["reply_parameters"] = reply_parameters
+        progress_message = telegram_call(token, "sendMessage", progress_params)
+    else:
+        telegram_call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
 
-    results = check_orders(config, document_numbers)
+    results = check_orders(config, document_numbers, language)
     for index, result in enumerate(results, start=1):
-        heading = f"Результат {index}/{count}\n\n" if count > 1 else ""
+        save_check_audit(message, document_numbers[index - 1], result, language)
+        heading = (
+            (f"Natija {index}/{count}\n\n" if language == "uz" else f"Результат {index}/{count}\n\n")
+            if count > 1 else ""
+        )
         chunks = split_telegram_text(heading + result["text"])
         for chunk in chunks:
             params = {"chat_id": chat_id, "text": chunk}
@@ -1728,15 +2408,20 @@ def send_batch_check(config, message, document_numbers):
         for table in result.get("tables", []):
             send_items_table(token, chat_id, table, reply_parameters)
 
-    finished_params = {
-        "chat_id": chat_id,
-        "text": f"✅ {mention}, проверка завершена. Проверено заявок: {count}.",
-        "parse_mode": "HTML",
-        "reply_markup": json.dumps(main_keyboard(True), ensure_ascii=False),
-    }
-    if reply_parameters:
-        finished_params["reply_parameters"] = reply_parameters
-    telegram_call(token, "sendMessage", finished_params)
+    progress_message_id = progress_message.get("message_id") if isinstance(progress_message, dict) else None
+    if progress_message_id is not None:
+        try:
+            telegram_call(token, "editMessageText", {
+                "chat_id": chat_id,
+                "message_id": progress_message_id,
+                "text": (
+                    f"✅ {mention}, tekshirilgan arizalar: {count}" if language == "uz"
+                    else f"✅ {mention}, проверено заявок: {count}"
+                ),
+                "parse_mode": "HTML",
+            })
+        except Exception:
+            logging.exception("progress_message_edit_failed chat_id=%s message_id=%s", chat_id, progress_message_id)
 
 
 def handle_message(config, message):
@@ -1752,9 +2437,13 @@ def handle_message(config, message):
     reply_parameters = None
     command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text.startswith("/") else ""
     allowed = is_allowed(config, chat_id, user_id)
+    language = get_user_language(user_id) if allowed else "ru"
 
-    if command == "/chatid" or text == BUTTON_CHAT_ID:
-        answer = f"🆔 ID этого чата: {chat_id}\n👤 Ваш User ID: {user_id}"
+    if command == "/chatid" or is_button(text, "chat_id"):
+        answer = (
+            f"🆔 Ushbu chat IDsi: {chat_id}\n👤 Sizning User IDingiz: {user_id}" if language == "uz"
+            else f"🆔 ID этого чата: {chat_id}\n👤 Ваш User ID: {user_id}"
+        )
 
     elif command == "/start":
         WAITING_FOR_DOC.discard(state_key)
@@ -1767,84 +2456,134 @@ def handle_message(config, message):
             else:
                 greeting = ""
             answer = (
-                f"👋 Бот контроля заявок готов{greeting}.\n\n"
-                "Нажмите «🔍 Проверить заявку» или просто отправьте её номер."
+                (f"👋 Arizalarni nazorat qilish boti tayyor{greeting}.\n\n"
+                 "«🔍 Arizani tekshirish» tugmasini bosing yoki ariza raqamini yuboring."
+                 if language == "uz" else
+                 f"👋 Бот контроля заявок готов{greeting}.\n\n"
+                 "Нажмите «🔍 Проверить заявку» или просто отправьте её номер.")
             )
-            reply_markup = main_keyboard(True)
+            reply_markup = main_keyboard(True, language)
         else:
             answer, reply_markup = start_registration(message)
 
-    elif command == "/register" or text == BUTTON_REGISTER:
+    elif command == "/register" or is_button(text, "register"):
         WAITING_FOR_DOC.discard(state_key)
-        answer, reply_markup = start_registration(message)
+        answer, reply_markup = start_registration(message, language)
 
     elif registration_active(user_id, chat_id):
         WAITING_FOR_DOC.discard(state_key)
         answer, reply_markup = process_registration_message(message)
         allowed = is_allowed(config, chat_id, user_id)
+        if allowed:
+            language = get_user_language(user_id)
 
-    elif command == "/help" or text == BUTTON_HELP:
+    elif command == "/help" or is_button(text, "help"):
         WAITING_FOR_DOC.discard(state_key)
-        answer = help_text()
+        answer = help_text(language)
 
     elif not allowed:
         if str(chat.get("type") or "") == "private":
-            answer = "👤 Для работы с ботом нужно пройти регистрацию. Нажмите «📝 Регистрация» или отправьте /start."
+            answer = (
+                "👤 Botdan foydalanish uchun ro'yxatdan o'ting. «📝 Ro'yxatdan o'tish»ni bosing yoki /start yuboring."
+                if language == "uz" else
+                "👤 Для работы с ботом нужно пройти регистрацию. Нажмите «📝 Регистрация» или отправьте /start."
+            )
         else:
-            answer = "👤 Вы ещё не зарегистрированы. Откройте бота в личных сообщениях и отправьте /start."
-        reply_markup = main_keyboard(False)
+            answer = (
+                "👤 Siz hali ro'yxatdan o'tmagansiz. Botni shaxsiy chatda ochib, /start yuboring."
+                if language == "uz" else
+                "👤 Вы ещё не зарегистрированы. Откройте бота в личных сообщениях и отправьте /start."
+            )
+        reply_markup = main_keyboard(False, language)
 
-    elif command == "/health" or text == BUTTON_HEALTH:
+    elif command == "/health" or is_button(text, "health"):
         WAITING_FOR_DOC.discard(state_key)
         telegram_call(config["telegram_bot_token"], "sendChatAction", {"chat_id": chat_id, "action": "typing"})
-        answer = check_health(config)
+        answer = localize_text(check_health(config), language)
 
-    elif text == BUTTON_CHECK:
+    elif command == "/report":
+        WAITING_FOR_DOC.discard(state_key)
+        if not is_admin(config, chat_id, user_id):
+            answer = "⛔ Bu buyruq faqat administratorlar uchun." if language == "uz" else "⛔ Эта команда доступна только администраторам."
+        else:
+            argument = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else "7"
+            try:
+                days = int(argument)
+                if not 1 <= days <= 365:
+                    raise ValueError
+                answer = build_report(days, language)
+            except ValueError:
+                answer = "Format: /report 7 (1 dan 365 kungacha)" if language == "uz" else "Формат: /report 7 (от 1 до 365 дней)"
+
+    elif is_button(text, "check"):
         WAITING_FOR_DOC.add(state_key)
-        answer = "Введите ID заявки из Smartup.\nНапример: 4411939"
-        reply_markup = force_reply_keyboard()
+        answer = (
+            "Smartupdagi ariza IDsini kiriting.\nMasalan: 4411939" if language == "uz"
+            else "Введите ID заявки из Smartup.\nНапример: 4411939"
+        )
+        reply_markup = force_reply_keyboard(language)
         if message.get("message_id") is not None:
             reply_parameters = {"message_id": message["message_id"]}
 
-    elif command == "/cancel" or text == BUTTON_CANCEL:
+    elif command == "/cancel" or is_button(text, "cancel"):
         WAITING_FOR_DOC.discard(state_key)
-        answer = "Проверка отменена."
+        answer = "Tekshiruv bekor qilindi." if language == "uz" else "Проверка отменена."
 
     else:
         documents, invalid = parse_document_numbers(text)
         max_batch = max(1, int(config.get("max_batch_documents", 10)))
         if command and command != "/check":
-            answer = "Команда не распознана. Нажмите «ℹ️ Инструкция»."
+            answer = (
+                "Buyruq aniqlanmadi. «ℹ️ Qo'llanma»ni bosing." if language == "uz"
+                else "Команда не распознана. Нажмите «ℹ️ Инструкция»."
+            )
         elif command == "/check" and not documents and not invalid:
             WAITING_FOR_DOC.add(state_key)
-            answer = "Введите один или несколько ID заявок из Smartup."
-            reply_markup = force_reply_keyboard()
+            answer = (
+                "Smartupdagi bir yoki bir nechta ariza IDsini kiriting." if language == "uz"
+                else "Введите один или несколько ID заявок из Smartup."
+            )
+            reply_markup = force_reply_keyboard(language)
             if message.get("message_id") is not None:
                 reply_parameters = {"message_id": message["message_id"]}
         elif invalid or not documents:
             if state_key in WAITING_FOR_DOC:
-                invalid_text = f"\nНекорректные значения: {', '.join(invalid[:5])}" if invalid else ""
-                answer = (
-                    "Неверный формат. Отправьте ID через пробел, запятую или с новой строки."
-                    f"\nНапример: 4411939 4411940{invalid_text}"
-                )
-                reply_markup = force_reply_keyboard()
+                if language == "uz":
+                    invalid_text = f"\nNoto'g'ri qiymatlar: {', '.join(invalid[:5])}" if invalid else ""
+                    answer = (
+                        "Format noto'g'ri. IDlarni bo'sh joy, vergul yoki yangi qatordan yuboring."
+                        f"\nMasalan: 4411939 4411940{invalid_text}"
+                    )
+                else:
+                    invalid_text = f"\nНекорректные значения: {', '.join(invalid[:5])}" if invalid else ""
+                    answer = (
+                        "Неверный формат. Отправьте ID через пробел, запятую или с новой строки."
+                        f"\nНапример: 4411939 4411940{invalid_text}"
+                    )
+                reply_markup = force_reply_keyboard(language)
                 if message.get("message_id") is not None:
                     reply_parameters = {"message_id": message["message_id"]}
             else:
-                answer = "Команда не распознана. Нажмите «ℹ️ Инструкция»."
+                answer = (
+                    "Buyruq aniqlanmadi. «ℹ️ Qo'llanma»ni bosing." if language == "uz"
+                    else "Команда не распознана. Нажмите «ℹ️ Инструкция»."
+                )
         elif len(documents) > max_batch:
-            answer = f"⚠️ За один раз можно проверить не больше {max_batch} заявок. Получено: {len(documents)}."
-            reply_markup = force_reply_keyboard()
+            answer = (
+                f"⚠️ Bir martada ko'pi bilan {max_batch} ta arizani tekshirish mumkin. Qabul qilindi: {len(documents)}."
+                if language == "uz" else
+                f"⚠️ За один раз можно проверить не больше {max_batch} заявок. Получено: {len(documents)}."
+            )
+            reply_markup = force_reply_keyboard(language)
             if message.get("message_id") is not None:
                 reply_parameters = {"message_id": message["message_id"]}
         else:
             WAITING_FOR_DOC.discard(state_key)
-            send_batch_check(config, message, documents)
+            send_batch_check(config, message, documents, language)
             return
 
     if reply_markup is None:
-        reply_markup = main_keyboard(is_allowed(config, chat_id, user_id))
+        reply_markup = main_keyboard(is_allowed(config, chat_id, user_id), language)
 
     params = {
         "chat_id": chat_id,
@@ -1855,20 +2594,30 @@ def handle_message(config, message):
         params["reply_parameters"] = json.dumps(reply_parameters)
     telegram_call(config["telegram_bot_token"], "sendMessage", params)
 
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
+
 def main():
     global USER_STORE
+    setup_logging()
     try:
         config = load_config()
     except Exception as error:
-        print(f"Ошибка конфигурации: {error}", file=sys.stderr)
+        logging.error("configuration_error: %s", error)
         return 1
 
     try:
         USER_STORE = create_user_store()
     except Exception as error:
-        print(f"Ошибка хранилища пользователей ({APP_ENV}): {error}", file=sys.stderr)
+        logging.error("storage_error environment=%s error=%s", APP_ENV, error)
         return 1
-    print(f"Режим {APP_ENV}: пользователи хранятся в {USER_STORE.describe()}", file=sys.stderr)
+    logging.info("bot_started environment=%s user_store=%s audit_store=%s", APP_ENV, USER_STORE.describe(), AUDIT_PATH if APP_ENV == "development" else "PostgreSQL/check_events")
 
     token = config["telegram_bot_token"]
     offset = 0
@@ -1882,8 +2631,10 @@ def main():
                 elif "callback_query" in update:
                     handle_callback(config, update["callback_query"])
         except KeyboardInterrupt:
+            logging.info("bot_stopped")
             return 0
         except Exception:
+            logging.exception("update_loop_error")
             time.sleep(3)
 
 

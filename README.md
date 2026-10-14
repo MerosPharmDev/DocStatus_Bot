@@ -32,20 +32,64 @@ curl.exe -u Web:ПАРОЛЬ "http://TMS-SERVER/БАЗА/hs/СЕРВИС/МЕТ�
 WMS:
 
 ```json
-{"order_found": true, "assembly_completed": true}
+{
+  "order_found": true,
+  "assembly_found": true,
+  "assembly_finished": true,
+  "basket_quantity": 0,
+  "basket_has_items": false,
+  "assembly_items": [
+    {"product_code": "A13581", "product_name": "Товар", "series": "34827282", "quantity": 50}
+  ],
+  "unassembled_items": [],
+  "basket_items": []
+}
 ```
 
 Бухгалтерия:
 
 ```json
-{"document_found": true, "document_posted": true, "invoice_sent": true, "accounting_completed": true, "error": ""}
+{
+  "document_found": true,
+  "document_posted": true,
+  "invoice_status": "Подписан клиентом",
+  "invoice_sent": true,
+  "accounting_completed": true,
+  "contract_check_required": false,
+  "correspondent_filled": false,
+  "document_contract_filled": false,
+  "active_contract_found": false,
+  "contract_matches": false,
+  "document_contract": "",
+  "active_contract": "",
+  "error": ""
+}
 ```
+
+Поле `invoice_sent` сохранено для совместимости и означает, что ЭСФ подписана.
+Бухгалтерия считается завершённой только при одновременно проведённом документе
+и подписанной ЭСФ. Если ЭСФ не подписана, сервис устанавливает
+`contract_check_required: true` и возвращает результат проверки договора.
+В этом случае бот показывает текущий статус ЭСФ, договор документа и активный
+договор. При отсутствии или несовпадении договора бот направляет пользователя в
+бухгалтерию.
 
 TMS:
 
 ```json
 {"order_found": true, "driver": "Иванов И.И.", "ttn_sent": true}
 ```
+
+Для полной проверки расхождений WMS должна передавать `assembly_items`. При
+несовпадении бот отправляет отдельную полную таблицу: товар, код, серия,
+количество в Smartup, количество в WMS и причина расхождения. Длинная таблица
+автоматически разбивается на несколько сообщений.
+
+## Язык интерфейса
+
+Выбранный при регистрации язык сохраняется у пользователя. Для `uz` на
+узбекский переключаются клавиатура, подсказки, результаты проверки, таблицы,
+состояние интеграций и отчёты. Повторно выбрать язык можно командой `/register`.
 
 ## Где запускать
 
@@ -142,7 +186,10 @@ docker compose exec -T postgres psql -U docstatus -d docstatus < backup.sql
 
 ### Логи
 
-Бот пишет логи в stdout — их собирает и ротирует сам Docker, файлы внутри проекта не создаются. Это стандартный подход для контейнеров: приложение не управляет файлами логов, этим занимается платформа.
+Бот пишет технические логи и структурированные события `check_event` в stdout —
+их собирает и ротирует Docker. Событие содержит пользователя, номер заявки,
+стадию, итог, длительность, склад, причины проблем и признак использования
+кеша. Пароли и токен в события не попадают.
 
 ```bash
 docker compose logs -f                  # поток логов
@@ -151,6 +198,22 @@ docker compose logs --since 1h          # за последний час
 ```
 
 Ротация настроена в `docker-compose.yml` (`max-size: 10m`, `max-file: 3`) — логи не разрастутся на диске. При необходимости их можно перенаправить в systemd/journald или во внешний сборщик (Loki, ELK), сменив `driver` в секции `logging`.
+
+Кроме stdout ведётся постоянный журнал проверок:
+
+- `development` — `data/check_events.jsonl` (путь меняется через `AUDIT_PATH`);
+- `production` — таблица PostgreSQL `check_events`, создаётся автоматически.
+
+Администратор из `admin_chat_ids` может получить сводку прямо в Telegram:
+
+```text
+/report       # последние 7 дней
+/report 30    # последние 30 дней
+```
+
+Сводка показывает количество проверок, уникальных пользователей и заявок,
+распределение итогов и стадий, а также наиболее активных пользователей. Срок
+отчёта — от 1 до 365 дней.
 
 `config.json` монтируется в контейнер только для чтения. После его изменения достаточно `docker compose restart docstatus-bot`.
 
