@@ -289,6 +289,7 @@ def help_text(language="ru"):
 # Result formatting is shared by both languages.  Keeping the translation here means
 # business rules cannot silently diverge between the Russian and Uzbek interfaces.
 UZ_REPLACEMENTS = {
+    "Серии или количество Smartup и WMS не совпадают": "Smartup va WMS seriyalari yoki miqdori mos emas",
     "Обратитесь на склад: товар необходимо убрать из корзины": "Omborga murojaat qiling: tovarni savatdan olib tashlash kerak",
     "Обратитесь на склад: проверьте серии товара внутри сборки": "Omborga murojaat qiling: yig'im ichidagi tovar seriyalarini tekshiring",
     "Заявка всё ещё находится в ожидании. Обратитесь на склад": "Ariza hali ham kutish bosqichida. Omborga murojaat qiling",
@@ -1371,7 +1372,7 @@ def format_wms(wms, status_code, responsible="", series_check=None):
                 problems = 1
                 warehouse_contact = True
             elif series_check and not series_check.get("matches"):
-                lines.append("❌ Серии Smartup и WMS не совпадают")
+                lines.append("❌ Серии или количество Smartup и WMS не совпадают")
                 mismatch_items = series_check.get("items", [])
                 if mismatch_items:
                     lines.append(f"📦 Товаров с расхождениями: {len(mismatch_items)} — таблица ниже")
