@@ -174,6 +174,36 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["wms_quantity"], "3")
         self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
 
+    def test_series_comparison_uses_order_quantity_after_full_return(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1",
+                    "product_name": "Returned product",
+                    "card_code": "S1",
+                    "order_quant": 2,
+                    "sold_quant": 0,
+                    "return_quant": 2,
+                }]
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1",
+                "product_name": "Returned product",
+                "series": "S1",
+                "quantity": 2,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
+        self.assertTrue(result["available"])
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["items"], [])
+
     def test_uzbek_keyboard_and_result_translation(self):
         keyboard = bot.main_keyboard(True, "uz")
         self.assertEqual(keyboard["keyboard"][0][0]["text"], "🔍 Arizani tekshirish")
