@@ -174,7 +174,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["wms_quantity"], "3")
         self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
 
-    def test_series_comparison_flags_returned_item_still_present_in_wms(self):
+    def test_series_comparison_keeps_original_wms_quantity_after_full_return(self):
         smartup = {
             "order": {
                 "order_products": [{
@@ -200,35 +200,18 @@ class BotTests(unittest.TestCase):
         result = bot.compare_series(smartup, wms)
 
         self.assertTrue(result["available"])
-        self.assertFalse(result["matches"])
-        self.assertEqual(len(result["items"]), 1)
-        self.assertEqual(result["items"][0]["smartup_quantity"], "0")
-        self.assertEqual(result["items"][0]["wms_quantity"], "2")
-        self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["items"], [])
 
-        wms_result = {
-            "document_found": True,
-            "assembly_found": True,
-            "assembled": True,
-            "assembly_finished": True,
-            "basket_quantity": 0,
-            "basket_has_items": False,
-            "assembly_items": wms["assembly_items"],
-            "unassembled_items": [],
-            "basket_items": [],
-        }
-        lines, problems, unavailable = bot.format_wms(wms_result, "B#V", series_check=result)
-        self.assertIn("❌ Серии или количество Smartup и WMS не совпадают", lines)
-        self.assertEqual((problems, unavailable), (1, 0))
-
-    def test_series_comparison_calculates_net_quantity_when_sold_quantity_is_missing(self):
+    def test_series_comparison_reconstructs_original_quantity_when_order_quantity_is_missing(self):
         smartup = {
             "order": {
                 "order_products": [{
                     "product_code": "A1",
                     "product_name": "Partially returned product",
                     "card_code": "S1",
-                    "order_quant": 5,
+                    "sold_quant": 3,
                     "return_quant": 2,
                 }]
             }
@@ -239,7 +222,7 @@ class BotTests(unittest.TestCase):
                 "product_code": "A1",
                 "product_name": "Partially returned product",
                 "series": "S1",
-                "quantity": 3,
+                "quantity": 5,
             }],
         }
 
