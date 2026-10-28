@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,6 +48,108 @@ WAITING_FOR_DOC = set()
 REGISTRATION = {}
 AUDIT_LOCK = threading.Lock()
 LOCAL_TIMEZONE = timezone(timedelta(hours=5), name="Asia/Tashkent")
+
+
+MESSAGES = {
+    "ru": {
+        "result.header": "Заявка {number}",
+        "result.cache": "♻️ Результат взят из кеша",
+        "smartup.unavailable": "❌ Smartup недоступен: {error}",
+        "smartup.route_unknown": "➡️ Невозможно определить, какую систему нужно проверять",
+        "smartup.not_found": "❌ Smartup: заявка не найдена",
+        "smartup.check_number": "➡️ Проверьте правильность номера заявки",
+        "smartup.number_owner": "👤 Если номер верный — обратитесь к оператору",
+        "smartup.found": "✅ Smartup: найдена",
+        "result.status": "📌 Статус: {status}",
+        "result.date": "📅 Дата: {date}",
+        "result.warehouse": "🏢 Склад: {names}",
+        "result.warehouse_code": "🏢 Код склада Smartup: {codes}",
+        "status.cancelled": "🚫 Заявка отменена",
+        "status.cancelled_checks": "➡️ Проверки WMS и бухгалтерии не требуются",
+        "status.cancelled_owner": "👤 По вопросам отмены обратитесь к оператору",
+        "status.draft": "⚠️ Заявка сохранена как черновик и ещё не запущена в работу",
+        "status.draft_action": "➡️ Оператор должен завершить оформление заявки и перевести её в стадию «Новый»",
+        "status.operator_owner": "👤 Обратитесь к оператору",
+        "status.new": "⚠️ Заявка ещё не передана на финансовую проверку",
+        "status.new_action": "➡️ Оператор должен перевести заявку в стадию «В обработке»",
+        "status.new_next": "➡️ После этого заявка будет передана в финансовый отдел",
+        "status.processing": "⏳ Заявка передана в финансовый отдел",
+        "status.processing_check": "➡️ Выполняется проверка в системе «Плюсовой баланс»",
+        "status.processing_wait": "👤 Если стадия долго не меняется — обратитесь в финансовый отдел",
+        "routing.found": "ℹ️ Склад определён по данным WMS: {names}",
+        "routing.scan": "ℹ️ Склад не сопоставлен с настройками: выполнен поиск по всем WMS",
+        "wms.no_regions": "❌ WMS проверить не удалось: нет настроенных складов",
+        "result.region": "📍 Регион: {name}",
+        "status.unknown": "⚠️ Для этой стадии правило проверки ещё не настроено",
+        "status.admin_owner": "👤 Обратитесь к администратору бота",
+        "result.responsible": "👤 Ответственный: {owner}",
+        "result.not_checked": "⚠️ Не проверено: {reason}",
+        "result.action": "➡️ Что делать: {action}",
+        "result.direct_action": "➡️ {action}",
+        "outcome.cancelled": "ℹ️ ИТОГ: ЗАЯВКА ОТМЕНЕНА",
+        "outcome.ok": "✅ ИТОГ: ОШИБОК НЕ НАЙДЕНО",
+        "outcome.problem": "❌ ИТОГ: ЕСТЬ ПРОБЛЕМА",
+        "outcome.incomplete": "⚠️ ИТОГ: ПРОВЕРКА НЕ ЗАВЕРШЕНА",
+        "outcome.pending": "ℹ️ ИТОГ: ЗАЯВКА В РАБОТЕ",
+        "result.checked_at": "🕒 Проверено: {value}",
+        "result.duration": "⏱ {seconds:.1f} сек.",
+        "report.pending": "⏳ В работе: {count}",
+    },
+    "uz": {
+        "result.header": "Ariza {number}",
+        "result.cache": "♻️ Natija keshdan olindi",
+        "smartup.unavailable": "❌ Smartup ishlamayapti: {error}",
+        "smartup.route_unknown": "➡️ Qaysi tizimni tekshirish kerakligini aniqlab bo'lmadi",
+        "smartup.not_found": "❌ Smartup: ariza topilmadi",
+        "smartup.check_number": "➡️ Ariza raqami to'g'riligini tekshiring",
+        "smartup.number_owner": "👤 Raqam to'g'ri bo'lsa — operatorga murojaat qiling",
+        "smartup.found": "✅ Smartup: topildi",
+        "result.status": "📌 Holat: {status}",
+        "result.date": "📅 Sana: {date}",
+        "result.warehouse": "🏢 Ombor: {names}",
+        "result.warehouse_code": "🏢 Smartup ombor kodi: {codes}",
+        "status.cancelled": "🚫 Ariza bekor qilingan",
+        "status.cancelled_checks": "➡️ WMS va buxgalteriyani tekshirish talab etilmaydi",
+        "status.cancelled_owner": "👤 Bekor qilish bo'yicha operatorga murojaat qiling",
+        "status.draft": "⚠️ Ariza qoralama sifatida saqlangan va hali ishga tushirilmagan",
+        "status.draft_action": "➡️ Operator arizani rasmiylashtirishni tugatib, «Yangi» bosqichiga o'tkazishi kerak",
+        "status.operator_owner": "👤 Operatorga murojaat qiling",
+        "status.new": "⚠️ Ariza hali moliyaviy tekshiruvga yuborilmagan",
+        "status.new_action": "➡️ Operator arizani «Qayta ishlanmoqda» bosqichiga o'tkazishi kerak",
+        "status.new_next": "➡️ Shundan keyin ariza moliya bo'limiga yuboriladi",
+        "status.processing": "⏳ Ariza moliya bo'limiga yuborildi",
+        "status.processing_check": "➡️ «Plyusovoy balans» tizimida tekshiruv bajarilmoqda",
+        "status.processing_wait": "👤 Bosqich uzoq vaqt o'zgarmasa, moliya bo'limiga murojaat qiling",
+        "routing.found": "ℹ️ Ombor WMS ma'lumotlari bo'yicha aniqlandi: {names}",
+        "routing.scan": "ℹ️ Ombor sozlamalarga mos kelmadi: barcha WMS tizimlarida qidirildi",
+        "wms.no_regions": "❌ WMSni tekshirib bo'lmadi: sozlangan omborlar yo'q",
+        "result.region": "📍 Hudud: {name}",
+        "status.unknown": "⚠️ Bu bosqich uchun tekshiruv qoidasi hali sozlanmagan",
+        "status.admin_owner": "👤 Bot administratoriga murojaat qiling",
+        "result.responsible": "👤 Mas'ul: {owner}",
+        "result.not_checked": "⚠️ Tekshirilmadi: {reason}",
+        "result.action": "➡️ Nima qilish kerak: {action}",
+        "result.direct_action": "➡️ {action}",
+        "outcome.cancelled": "ℹ️ YAKUN: ARIZA BEKOR QILINGAN",
+        "outcome.ok": "✅ YAKUN: XATOLAR TOPILMADI",
+        "outcome.problem": "❌ YAKUN: MUAMMO BOR",
+        "outcome.incomplete": "⚠️ YAKUN: TEKSHIRUV YAKUNLANMADI",
+        "outcome.pending": "ℹ️ YAKUN: ARIZA JARAYONDA",
+        "result.checked_at": "🕒 Tekshirildi: {value}",
+        "result.duration": "⏱ {seconds:.1f} soniya",
+        "report.pending": "⏳ Jarayonda: {count}",
+    },
+}
+
+
+def message_text(language, key, **values):
+    """Return a complete localized message; missing keys fail loudly in tests/startup."""
+    language = normalized_language(language)
+    try:
+        template = MESSAGES[language][key]
+    except KeyError as error:
+        raise RuntimeError(f"Не найден перевод {key!r} для языка {language!r}") from error
+    return template.format(**values)
 
 BUTTON_CHECK = "🔍 Проверить заявку"
 BUTTON_HELP = "ℹ️ Инструкция"
@@ -394,6 +497,7 @@ UZ_REPLACEMENTS = {
 
 
 def localize_text(value, language):
+    """Legacy translation for service details not yet emitted through message_text()."""
     text = str(value)
     if normalized_language(language) != "uz":
         return text
@@ -402,11 +506,78 @@ def localize_text(value, language):
     return text
 
 
+class UpdateDispatcher:
+    """Run different users concurrently while preserving each user's message order."""
+
+    def __init__(self, max_workers=4):
+        self.executor = ThreadPoolExecutor(max_workers=max(1, int(max_workers)))
+        self.lock = threading.Lock()
+        self.queues = {}
+        self.closed = False
+
+    def submit(self, key, function, *args, **kwargs):
+        with self.lock:
+            if self.closed:
+                raise RuntimeError("Диспетчер обновлений уже остановлен")
+            queue = self.queues.setdefault(key, deque())
+            queue.append((function, args, kwargs))
+            if len(queue) == 1:
+                self.executor.submit(self._drain, key)
+
+    def _drain(self, key):
+        while True:
+            with self.lock:
+                queue = self.queues.get(key)
+                if not queue:
+                    return
+                function, args, kwargs = queue[0]
+            try:
+                function(*args, **kwargs)
+            except Exception:
+                logging.exception("update_handler_error key=%s", key)
+            with self.lock:
+                queue = self.queues.get(key)
+                if not queue:
+                    return
+                queue.popleft()
+                if not queue:
+                    self.queues.pop(key, None)
+                    return
+
+    def shutdown(self, wait=False):
+        with self.lock:
+            self.closed = True
+        self.executor.shutdown(wait=wait, cancel_futures=True)
+
+
+def update_dispatch_key(update):
+    if "message" in update:
+        message = update["message"]
+        chat_id = message.get("chat", {}).get("id")
+        user_id = message.get("from", {}).get("id", chat_id)
+        return str(chat_id), str(user_id)
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        chat_id = callback.get("message", {}).get("chat", {}).get("id")
+        user_id = callback.get("from", {}).get("id", chat_id)
+        return str(chat_id), str(user_id)
+    return "update", str(update.get("update_id"))
+
+
+def dispatch_update(dispatcher, config, update):
+    key = update_dispatch_key(update)
+    if "message" in update:
+        dispatcher.submit(key, handle_message, config, update["message"])
+    elif "callback_query" in update:
+        dispatcher.submit(key, handle_callback, config, update["callback_query"])
+
+
 class JsonUserStore:
     """Хранилище пользователей для разработки: access.json."""
 
     def __init__(self, path):
         self.path = path
+        self.lock = threading.RLock()
 
     def describe(self):
         return f"JSON-файл {self.path}"
@@ -433,20 +604,22 @@ class JsonUserStore:
             return empty
 
     def get_user(self, user_id):
-        return self._load()["users"].get(str(user_id))
+        with self.lock:
+            return self._load()["users"].get(str(user_id))
 
     def save_user(self, user):
-        state = self._load()
-        record = dict(user)
-        record["registered_at"] = record["registered_at"].isoformat(timespec="seconds")
-        state["users"][str(user["telegram_user_id"])] = record
+        with self.lock:
+            state = self._load()
+            record = dict(user)
+            record["registered_at"] = record["registered_at"].isoformat(timespec="seconds")
+            state["users"][str(user["telegram_user_id"])] = record
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.path.with_suffix(".json.tmp")
-        with temp_path.open("w", encoding="utf-8") as stream:
-            json.dump(state, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-        temp_path.replace(self.path)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.path.with_suffix(".json.tmp")
+            with temp_path.open("w", encoding="utf-8") as stream:
+                json.dump(state, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+            temp_path.replace(self.path)
 
     def save_check_event(self, event):
         AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1828,11 +2001,53 @@ def wms_summary(wms, status_code, series_check=None, responsible=""):
     return "", "", ""
 
 
-def format_result(doc_number, results):
-    lines = [f"Заявка {doc_number}", ""]
+def apply_wms_fallback_routing(results, configured_regions):
+    """Keep only WMS regions that actually found the order during fallback search."""
+    results["wms_matched_regions"] = []
+    if results.get("warehouse_routing_exact", True):
+        return
+
+    matched_indexes = []
+    for index, item in enumerate(results.get("regions", [])):
+        if not item.get("selected", True):
+            continue
+        wms = item.get("wms", {})
+        if (
+            isinstance(wms, dict)
+            and not wms.get("_error")
+            and bool_value(wms, "document_found", "order_found")
+        ):
+            matched_indexes.append(index)
+
+    if not matched_indexes:
+        return
+
+    matched_names = []
+    warehouse_names = list(results.get("warehouse_names", []))
+    for index, item in enumerate(results.get("regions", [])):
+        selected = index in matched_indexes
+        item["selected"] = selected
+        if not selected:
+            continue
+        region = configured_regions[index] if index < len(configured_regions) else {}
+        name = str(item.get("name") or region.get("name") or "").strip()
+        if name and name not in matched_names:
+            matched_names.append(name)
+        warehouse_name = str(region.get("warehouse_name") or name).strip()
+        if warehouse_name and warehouse_name not in warehouse_names:
+            warehouse_names.append(warehouse_name)
+
+    results["wms_matched_regions"] = matched_names
+    results["warehouse_names"] = warehouse_names
+
+
+def format_result(doc_number, results, language="ru"):
+    language = normalized_language(language)
+    lines = [message_text(language, "result.header", number=doc_number), ""]
     problems = 0
     unavailable = 0
     cancelled = False
+    pending = False
     problem_reasons = []
     required_actions = []
     responsible_people = []
@@ -1840,94 +2055,97 @@ def format_result(doc_number, results):
 
     smartup = results.get("smartup", {})
     if smartup.get("_error"):
-        lines.append(f"❌ Smartup недоступен: {describe_error(smartup['_error'])}")
+        error = localize_text(describe_error(smartup["_error"]), language)
+        lines.append(message_text(language, "smartup.unavailable", error=error))
         unavailable = 1
-        lines.append("➡️ Невозможно определить, какую систему нужно проверять")
-        lines.append("👤 Ответственный: администратор интеграции")
+        lines.append(message_text(language, "smartup.route_unknown"))
+        lines.append(message_text(
+            language, "result.responsible",
+            owner=localize_text("администратор интеграции", language),
+        ))
         add_unique(unavailable_reasons, "Smartup недоступен")
         add_unique(required_actions, "Обратиться к администратору интеграции")
         add_unique(responsible_people, "администратор интеграции")
     elif not bool_value(smartup, "document_found"):
-        lines.append("❌ Smartup: заявка не найдена")
+        lines.append(message_text(language, "smartup.not_found"))
         problems = 1
-        lines.append("➡️ Проверьте правильность номера заявки")
-        lines.append("👤 Если номер верный — обратитесь к оператору")
+        lines.append(message_text(language, "smartup.check_number"))
+        lines.append(message_text(language, "smartup.number_owner"))
         add_unique(problem_reasons, "Заявка не найдена в Smartup")
         add_unique(required_actions, "Проверить номер заявки; если он верный — обратиться к оператору")
         add_unique(responsible_people, "оператор")
     else:
         status_code = str(smartup.get("status_code") or "").strip().upper()
         status_name = str(smartup.get("status") or "Статус не указан")
-        lines.append("✅ Smartup: найдена")
-        lines.append(f"📌 Статус: {status_name}")
+        lines.append(message_text(language, "smartup.found"))
+        lines.append(message_text(
+            language, "result.status", status=localize_text(status_name, language),
+        ))
         order_date = display_order_datetime(smartup.get("order", {}).get("deal_time"))
         if order_date:
-            lines.append(f"📅 Дата: {order_date}")
+            lines.append(message_text(language, "result.date", date=order_date))
 
         warehouse_codes = results.get("warehouse_codes", [])
         warehouse_names = results.get("warehouse_names", [])
         if warehouse_names:
-            lines.append(f"🏢 Склад: {', '.join(warehouse_names)}")
+            lines.append(message_text(language, "result.warehouse", names=", ".join(warehouse_names)))
         elif warehouse_codes:
-            lines.append(f"🏢 Код склада Smartup: {', '.join(warehouse_codes)}")
+            lines.append(message_text(language, "result.warehouse_code", codes=", ".join(warehouse_codes)))
 
         if status_code == "C":
-            lines.append("🚫 Заявка отменена")
-            lines.append("➡️ Проверки WMS и бухгалтерии не требуются")
-            lines.append("👤 По вопросам отмены обратитесь к оператору")
+            lines.append(message_text(language, "status.cancelled"))
+            lines.append(message_text(language, "status.cancelled_checks"))
+            lines.append(message_text(language, "status.cancelled_owner"))
             cancelled = True
 
         elif status_code == "D":
-            lines.append("⚠️ Заявка сохранена как черновик и ещё не запущена в работу")
-            lines.append("➡️ Оператор должен завершить оформление заявки и перевести её в стадию «Новый»")
-            lines.append("👤 Обратитесь к оператору")
+            lines.append(message_text(language, "status.draft"))
+            lines.append(message_text(language, "status.draft_action"))
+            lines.append(message_text(language, "status.operator_owner"))
             problems += 1
             add_unique(problem_reasons, "Заявка находится в черновике и ещё не запущена в работу")
             add_unique(required_actions, "Завершить оформление и перевести заявку в стадию «Новый»")
             add_unique(responsible_people, "оператор")
 
         elif status_code == "B#N":
-            lines.append("⚠️ Заявка ещё не передана на финансовую проверку")
-            lines.append("➡️ Оператор должен перевести заявку в стадию «В обработке»")
-            lines.append("➡️ После этого заявка будет передана в финансовый отдел")
-            lines.append("👤 Обратитесь к оператору")
+            lines.append(message_text(language, "status.new"))
+            lines.append(message_text(language, "status.new_action"))
+            lines.append(message_text(language, "status.new_next"))
+            lines.append(message_text(language, "status.operator_owner"))
             problems += 1
             add_unique(problem_reasons, "Заявка ещё не передана на финансовую проверку")
             add_unique(required_actions, "Перевести заявку в стадию «В обработке»")
             add_unique(responsible_people, "оператор")
 
         elif status_code == "B#E":
-            lines.append("⏳ Заявка передана в финансовый отдел")
-            lines.append("➡️ Выполняется проверка в системе «Плюсовой баланс»")
-            lines.append("👤 Если стадия долго не меняется — обратитесь в финансовый отдел")
+            lines.append(message_text(language, "status.processing"))
+            lines.append(message_text(language, "status.processing_check"))
+            lines.append(message_text(language, "status.processing_wait"))
+            pending = True
 
         elif status_code in ("B#W", "B#S", "B#V"):
             region_results = [item for item in results.get("regions", []) if item.get("selected", True)]
             if not results.get("warehouse_routing_exact", True):
-                lines.append("ℹ️ Склад не сопоставлен с настройками: выполнен поиск по WMS")
-                matched = [
-                    item for item in region_results
-                    if not item.get("wms", {}).get("_error")
-                    and bool_value(item.get("wms", {}), "document_found", "order_found")
-                ]
-                if matched:
-                    region_results = [
-                        item for item in region_results
-                        if item in matched or item.get("wms", {}).get("_error")
-                    ]
+                matched_names = results.get("wms_matched_regions", [])
+                if matched_names:
+                    lines.append(message_text(
+                        language, "routing.found", names=", ".join(matched_names),
+                    ))
+                else:
+                    lines.append(message_text(language, "routing.scan"))
             if not region_results:
-                lines.append("❌ WMS проверить не удалось: нет настроенных складов")
+                lines.append(message_text(language, "wms.no_regions"))
                 unavailable += 1
                 add_unique(unavailable_reasons, "Для склада не настроена WMS")
                 add_unique(required_actions, "Обратиться к администратору интеграции")
                 add_unique(responsible_people, "администратор интеграции")
             for item in region_results:
-                lines.extend(["", f"📍 Регион: {item['name']}"])
+                lines.extend(["", message_text(language, "result.region", name=item["name"])])
                 details, issue_count, error_count = format_wms(
                     item.get("wms", {}), status_code, item.get("wms_responsible", ""),
                     item.get("series_check"),
                 )
-                lines.extend(details)
+                lines.extend(localize_text(line, language) for line in details)
                 problems += issue_count
                 unavailable += error_count
                 reason, action, owner = wms_summary(
@@ -1944,7 +2162,7 @@ def format_result(doc_number, results):
 
         elif status_code == "A":
             accounting_result = format_accounting(results.get("accounting", {}))
-            lines.extend(accounting_result["lines"])
+            lines.extend(localize_text(line, language) for line in accounting_result["lines"])
             problems += accounting_result["problems"]
             unavailable += accounting_result["unavailable"]
             for reason in accounting_result["problem_reasons"]:
@@ -1957,8 +2175,8 @@ def format_result(doc_number, results):
                 add_unique(responsible_people, owner)
 
         else:
-            lines.append("⚠️ Для этой стадии правило проверки ещё не настроено")
-            lines.append("👤 Обратитесь к администратору бота")
+            lines.append(message_text(language, "status.unknown"))
+            lines.append(message_text(language, "status.admin_owner"))
             problems += 1
             add_unique(problem_reasons, "Для текущей стадии правило проверки не настроено")
             add_unique(required_actions, "Обратиться к администратору бота")
@@ -1967,26 +2185,34 @@ def format_result(doc_number, results):
     elapsed = float(results.get("_elapsed", 0))
     lines.append("")
     if cancelled and unavailable == 0:
-        lines.append("ℹ️ ИТОГ: ЗАЯВКА ОТМЕНЕНА")
+        lines.append(message_text(language, "outcome.cancelled"))
+    elif pending and problems == 0 and unavailable == 0:
+        lines.append(message_text(language, "outcome.pending"))
     elif problems == 0 and unavailable == 0:
-        lines.append("✅ ИТОГ: ОШИБОК НЕ НАЙДЕНО")
+        lines.append(message_text(language, "outcome.ok"))
     else:
         if problems > 0:
-            lines.append("❌ ИТОГ: ЕСТЬ ПРОБЛЕМА")
+            lines.append(message_text(language, "outcome.problem"))
         else:
-            lines.append("⚠️ ИТОГ: ПРОВЕРКА НЕ ЗАВЕРШЕНА")
+            lines.append(message_text(language, "outcome.incomplete"))
         for reason in unavailable_reasons:
-            lines.append(f"⚠️ Не проверено: {reason}")
+            lines.append(message_text(
+                language, "result.not_checked", reason=localize_text(reason, language),
+            ))
         for action in required_actions:
+            localized_action = localize_text(action, language)
             if action.startswith(("Обратитесь", "Повторите")):
-                lines.append(f"➡️ {action}")
+                lines.append(message_text(language, "result.direct_action", action=localized_action))
             else:
-                lines.append(f"➡️ Что делать: {action}")
+                lines.append(message_text(language, "result.action", action=localized_action))
         for owner in responsible_people:
-            lines.append(f"👤 Ответственный: {owner}")
+            lines.append(message_text(
+                language, "result.responsible", owner=localize_text(owner, language),
+            ))
     results["_summary"] = {
         "outcome": (
             "cancelled" if cancelled and unavailable == 0 else
+            "pending" if pending and problems == 0 and unavailable == 0 else
             "ok" if problems == 0 and unavailable == 0 else
             "problem" if problems > 0 else "incomplete"
         ),
@@ -1996,8 +2222,10 @@ def format_result(doc_number, results):
         "warehouses": list(results.get("warehouse_names", [])),
         "elapsed_seconds": elapsed,
     }
-    lines.append(f"🕒 Проверено: {datetime.now(LOCAL_TIMEZONE).strftime('%d.%m.%Y %H:%M')}")
-    lines.append(f"⏱ {elapsed:.1f} сек.")
+    lines.append(message_text(
+        language, "result.checked_at", value=datetime.now(LOCAL_TIMEZONE).strftime("%d.%m.%Y %H:%M"),
+    ))
+    lines.append(message_text(language, "result.duration", seconds=elapsed))
     return "\n".join(lines)
 
 
@@ -2009,12 +2237,11 @@ def check_order(config, doc_number, language="ru"):
     if cached and time.time() - cached[0] < cache_seconds:
         cached_result = cached[1]
         result = {
-            "text": cached_result["text"] + "\n♻️ Результат взят из кеша",
+            "text": cached_result["text"] + "\n" + message_text(language, "result.cache"),
             "tables": cached_result.get("tables", []),
             "summary": dict(cached_result.get("summary", {})),
             "from_cache": True,
         }
-        result["text"] = localize_text(result["text"], language)
         return result
 
     started = time.perf_counter()
@@ -2109,6 +2336,9 @@ def check_order(config, doc_number, language="ru"):
             else:
                 results["regions"][index][service_name] = value
 
+    if need_wms:
+        apply_wms_fallback_routing(results, regions)
+
     if need_wms and not smartup.get("_error"):
         for item in results["regions"]:
             wms = item.get("wms")
@@ -2123,7 +2353,7 @@ def check_order(config, doc_number, language="ru"):
                 item["series_check"] = compare_series(smartup, wms)
 
     results["_elapsed"] = time.perf_counter() - started
-    answer = localize_text(format_result(doc_number, results), language)
+    answer = format_result(doc_number, results, language)
     result = {
         "text": answer,
         "tables": collect_wms_tables(results, language),
@@ -2316,9 +2546,10 @@ def is_admin(config, chat_id, user_id):
 
 
 def build_report(days, language="ru"):
+    language = normalized_language(language)
     since = datetime.now(LOCAL_TIMEZONE) - timedelta(days=days)
     events = USER_STORE.get_check_events(since)
-    outcome_counts = {"ok": 0, "problem": 0, "incomplete": 0, "cancelled": 0}
+    outcome_counts = {"ok": 0, "problem": 0, "incomplete": 0, "cancelled": 0, "pending": 0}
     users = set()
     documents = set()
     statuses = {}
@@ -2346,6 +2577,7 @@ def build_report(days, language="ru"):
         f"✅ Без ошибок: {outcome_counts.get('ok', 0)}",
         f"❌ С проблемами: {outcome_counts.get('problem', 0)}",
         f"⚠️ Не завершены: {outcome_counts.get('incomplete', 0)}",
+        message_text(language, "report.pending", count=outcome_counts.get("pending", 0)),
         f"ℹ️ Отменённые заявки: {outcome_counts.get('cancelled', 0)}",
     ]
     if status_rows:
@@ -2620,17 +2852,16 @@ def main():
     logging.info("bot_started environment=%s user_store=%s audit_store=%s", APP_ENV, USER_STORE.describe(), AUDIT_PATH if APP_ENV == "development" else "PostgreSQL/check_events")
 
     token = config["telegram_bot_token"]
+    dispatcher = UpdateDispatcher(config.get("update_workers", 4))
     offset = 0
     while True:
         try:
             updates = telegram_call(token, "getUpdates", {"offset": offset, "timeout": 30}, timeout=40)
             for update in updates:
                 offset = max(offset, int(update["update_id"]) + 1)
-                if "message" in update:
-                    handle_message(config, update["message"])
-                elif "callback_query" in update:
-                    handle_callback(config, update["callback_query"])
+                dispatch_update(dispatcher, config, update)
         except KeyboardInterrupt:
+            dispatcher.shutdown(wait=False)
             logging.info("bot_stopped")
             return 0
         except Exception:

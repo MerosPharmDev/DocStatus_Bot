@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,145 @@ import bot
 
 
 class BotTests(unittest.TestCase):
+    def test_message_catalog_has_same_keys_for_every_language(self):
+        self.assertEqual(set(bot.MESSAGES["ru"]), set(bot.MESSAGES["uz"]))
+
+    def test_message_and_callback_share_dispatch_queue(self):
+        message_update = {
+            "message": {"chat": {"id": 1}, "from": {"id": 2}},
+        }
+        callback_update = {
+            "callback_query": {
+                "message": {"chat": {"id": 1}},
+                "from": {"id": 2},
+            },
+        }
+        self.assertEqual(
+            bot.update_dispatch_key(message_update),
+            bot.update_dispatch_key(callback_update),
+        )
+
+    def test_update_dispatcher_serializes_one_user_but_not_other_users(self):
+        dispatcher = bot.UpdateDispatcher(max_workers=2)
+        release_first = threading.Event()
+        other_finished = threading.Event()
+        same_user_finished = threading.Event()
+        calls = []
+
+        def first():
+            calls.append("first-start")
+            release_first.wait(2)
+            calls.append("first-end")
+
+        def second():
+            calls.append("second")
+            same_user_finished.set()
+
+        def other():
+            calls.append("other")
+            other_finished.set()
+
+        try:
+            dispatcher.submit(("message", "1", "10"), first)
+            dispatcher.submit(("message", "1", "10"), second)
+            dispatcher.submit(("message", "1", "20"), other)
+
+            self.assertTrue(other_finished.wait(1))
+            self.assertFalse(same_user_finished.is_set())
+            release_first.set()
+            self.assertTrue(same_user_finished.wait(1))
+            self.assertLess(calls.index("first-end"), calls.index("second"))
+        finally:
+            release_first.set()
+            dispatcher.shutdown(wait=True)
+
+    def test_wms_fallback_keeps_only_regions_that_found_the_order(self):
+        results = {
+            "warehouse_routing_exact": False,
+            "warehouse_names": [],
+            "regions": [
+                {"name": "Недоступный", "selected": True, "wms": {"_error": "timeout"}},
+                {"name": "Наманган", "selected": True, "wms": {"document_found": True}},
+                {"name": "Другой", "selected": True, "wms": {"document_found": False}},
+            ],
+        }
+        configured = [
+            {"name": "Недоступный"},
+            {"name": "Наманган", "warehouse_name": "Склад Наманган"},
+            {"name": "Другой"},
+        ]
+
+        bot.apply_wms_fallback_routing(results, configured)
+
+        self.assertEqual([item["selected"] for item in results["regions"]], [False, True, False])
+        self.assertEqual(results["wms_matched_regions"], ["Наманган"])
+        self.assertEqual(results["warehouse_names"], ["Склад Наманган"])
+
+    def test_unrelated_wms_error_is_not_shown_after_fallback_match(self):
+        good_wms = {
+            "document_found": True,
+            "assembly_found": True,
+            "assembled": True,
+            "assembly_finished": True,
+            "basket_quantity": 0,
+            "basket_has_items": False,
+            "assembly_items": [],
+            "unassembled_items": [],
+            "basket_items": [],
+        }
+        results = {
+            "smartup": {
+                "document_found": True,
+                "status_code": "B#W",
+                "status": "В ожидании",
+                "order": {},
+            },
+            "warehouse_routing_exact": False,
+            "warehouse_codes": ["unknown"],
+            "warehouse_names": [],
+            "regions": [
+                {"name": "Недоступный", "selected": True, "wms": {"_error": "timeout"}},
+                {
+                    "name": "Наманган",
+                    "selected": True,
+                    "wms": good_wms,
+                    "series_check": {"available": True, "matches": True, "issues": [], "items": []},
+                },
+            ],
+            "_elapsed": 0,
+        }
+        configured = [
+            {"name": "Недоступный"},
+            {"name": "Наманган", "warehouse_name": "Склад Наманган"},
+        ]
+
+        bot.apply_wms_fallback_routing(results, configured)
+        text = bot.format_result("42", results)
+
+        self.assertIn("Склад определён по данным WMS: Наманган", text)
+        self.assertNotIn("Недоступный", text)
+        self.assertNotIn("timeout", text)
+
+    def test_processing_order_has_pending_outcome_in_both_languages(self):
+        for language, expected in (("ru", "ИТОГ: ЗАЯВКА В РАБОТЕ"), ("uz", "YAKUN: ARIZA JARAYONDA")):
+            with self.subTest(language=language):
+                results = {
+                    "smartup": {
+                        "document_found": True,
+                        "status_code": "B#E",
+                        "status": "В обработке",
+                        "order": {},
+                    },
+                    "warehouse_codes": [],
+                    "warehouse_names": [],
+                    "_elapsed": 0,
+                }
+
+                text = bot.format_result("42", results, language)
+
+                self.assertIn(expected, text)
+                self.assertEqual(results["_summary"]["outcome"], "pending")
+
     def test_series_mismatch_contains_complete_table_row(self):
         smartup = {
             "order": {

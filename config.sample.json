@@ -4,6 +4,7 @@
   "admin_chat_ids": [123456789],
   "max_batch_documents": 10,
   "batch_workers": 3,
+  "update_workers": 4,
   "request_timeout_seconds": 20,
   "cache_seconds": 30,
   "health_doc_number": "0",
