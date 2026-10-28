@@ -174,6 +174,22 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["wms_quantity"], "3")
         self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
 
+        wms_result = {
+            "document_found": True,
+            "assembly_found": True,
+            "assembled": True,
+            "assembly_finished": True,
+            "basket_quantity": 0,
+            "basket_has_items": False,
+            "assembly_items": wms["assembly_items"],
+            "unassembled_items": [],
+            "basket_items": [],
+        }
+        lines, problems, unavailable = bot.format_wms(wms_result, "B#V", series_check=result)
+        self.assertIn("📦 Товаров с расхождениями: 1 — таблица ниже", lines)
+        self.assertFalse(any("Количество не совпало: Test product" in line for line in lines))
+        self.assertEqual((problems, unavailable), (1, 0))
+
     def test_series_comparison_keeps_original_wms_quantity_after_full_return(self):
         smartup = {
             "order": {

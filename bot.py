@@ -1325,7 +1325,13 @@ def compare_series(smartup, wms):
             "problem": problem,
         })
 
-    return {"available": True, "matches": not issues, "issues": issues, "items": mismatch_items}
+    return {
+        "available": True,
+        "matches": not issues,
+        "issues": issues,
+        "data_issues": list(dict.fromkeys(data_issues)),
+        "items": mismatch_items,
+    }
 
 
 def format_wms(wms, status_code, responsible="", series_check=None):
@@ -1376,9 +1382,15 @@ def format_wms(wms, status_code, responsible="", series_check=None):
                 mismatch_items = series_check.get("items", [])
                 if mismatch_items:
                     lines.append(f"📦 Товаров с расхождениями: {len(mismatch_items)} — таблица ниже")
-                for issue in series_check.get("issues", [])[:8]:
+                # Product mismatches are already rendered in the table.  Keep
+                # only structural data warnings in the text to avoid duplicates.
+                visible_issues = (
+                    series_check.get("data_issues", [])
+                    if mismatch_items else series_check.get("issues", [])
+                )
+                for issue in visible_issues[:8]:
                     lines.append(f"   • {issue}")
-                extra = len(series_check.get("issues", [])) - 8
+                extra = len(visible_issues) - 8
                 if extra > 0:
                     lines.append(f"   • Ещё расхождений: {extra}")
                 action = "Обратитесь на склад: проверьте серии товара внутри сборки"
