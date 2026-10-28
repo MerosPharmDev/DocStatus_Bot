@@ -1246,13 +1246,20 @@ def compare_series(smartup, wms):
         code = str(product.get("product_code") or "").strip()
         series = str(product.get("card_code") or "").strip()
         name = str(product.get("product_name") or product.get("name") or "").strip()
-        quantity = next(
-            # WMS contains the quantity assembled for the original order.  On a
-            # full return Smartup sets sold_quant to zero while order_quant still
-            # contains that assembled quantity, so order_quant must take priority.
-            (product.get(field) for field in ("order_quant", "sold_quant", "quantity") if product.get(field) is not None),
-            None,
-        )
+        # WMS must contain only the quantity that is still active after returns.
+        # Smartup normally exposes it as sold_quant.  If that field is absent,
+        # calculate the net quantity from order_quant - return_quant.
+        quantity = product.get("sold_quant")
+        if quantity is None and product.get("order_quant") is not None and product.get("return_quant") is not None:
+            try:
+                quantity = decimal_value(product["order_quant"]) - decimal_value(product["return_quant"])
+            except (InvalidOperation, ValueError):
+                quantity = None
+        if quantity is None:
+            quantity = next(
+                (product.get(field) for field in ("quantity", "order_quant") if product.get(field) is not None),
+                None,
+            )
         if not code:
             data_issues.append("В Smartup есть товар без product_code")
             continue

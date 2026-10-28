@@ -174,7 +174,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["wms_quantity"], "3")
         self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
 
-    def test_series_comparison_uses_order_quantity_after_full_return(self):
+    def test_series_comparison_flags_returned_item_still_present_in_wms(self):
         smartup = {
             "order": {
                 "order_products": [{
@@ -200,9 +200,38 @@ class BotTests(unittest.TestCase):
         result = bot.compare_series(smartup, wms)
 
         self.assertTrue(result["available"])
+        self.assertFalse(result["matches"])
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["smartup_quantity"], "0")
+        self.assertEqual(result["items"][0]["wms_quantity"], "2")
+        self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
+
+    def test_series_comparison_calculates_net_quantity_when_sold_quantity_is_missing(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1",
+                    "product_name": "Partially returned product",
+                    "card_code": "S1",
+                    "order_quant": 5,
+                    "return_quant": 2,
+                }]
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1",
+                "product_name": "Partially returned product",
+                "series": "S1",
+                "quantity": 3,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
         self.assertTrue(result["matches"])
         self.assertEqual(result["issues"], [])
-        self.assertEqual(result["items"], [])
 
     def test_uzbek_keyboard_and_result_translation(self):
         keyboard = bot.main_keyboard(True, "uz")
