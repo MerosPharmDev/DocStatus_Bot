@@ -94,6 +94,18 @@ MESSAGES = {
         "result.checked_at": "🕒 Проверено: {value}",
         "result.duration": "⏱ {seconds:.1f} сек.",
         "report.pending": "⏳ В работе: {count}",
+        "tms.card.header": "🚚 Отгрузка",
+        "tms.card.unavailable": "❌ TMS недоступна: {error}",
+        "tms.card.not_found": "❌ Документ отгрузки не найден",
+        "tms.card.waybill_missing": "❌ TMS: путевой лист не привязан",
+        "tms.card.driver": "👤 Водитель: {value}",
+        "tms.card.driver_missing": "⚠️ Водитель не указан",
+        "tms.card.transport": "🚛 Транспорт: {value}",
+        "tms.card.transport_missing": "⚠️ Транспорт не передан сервисом TMS",
+        "tms.card.ttn_sent": "✅ ТТН отправлена",
+        "tms.card.ttn_failed": "❌ ТТН не прошла",
+        "tms.card.ttn_reason": "⚠️ Причина: {value}",
+        "tms.card.ttn_reason_missing": "⚠️ Причина ошибки не передана сервисом TMS",
     },
     "uz": {
         "result.header": "Ariza {number}",
@@ -138,6 +150,18 @@ MESSAGES = {
         "result.checked_at": "🕒 Tekshirildi: {value}",
         "result.duration": "⏱ {seconds:.1f} soniya",
         "report.pending": "⏳ Jarayonda: {count}",
+        "tms.card.header": "🚚 Jo'natma",
+        "tms.card.unavailable": "❌ TMS ishlamayapti: {error}",
+        "tms.card.not_found": "❌ Jo'natma hujjati topilmadi",
+        "tms.card.waybill_missing": "❌ TMS: yo'l varaqasi biriktirilmagan",
+        "tms.card.driver": "👤 Haydovchi: {value}",
+        "tms.card.driver_missing": "⚠️ Haydovchi ko'rsatilmagan",
+        "tms.card.transport": "🚛 Transport: {value}",
+        "tms.card.transport_missing": "⚠️ Transport TMS xizmati tomonidan berilmagan",
+        "tms.card.ttn_sent": "✅ TTN yuborildi",
+        "tms.card.ttn_failed": "❌ TTN o'tmadi",
+        "tms.card.ttn_reason": "⚠️ Sabab: {value}",
+        "tms.card.ttn_reason_missing": "⚠️ Xato sababi TMS xizmati tomonidan berilmagan",
     },
 }
 
@@ -261,10 +285,10 @@ def help_text(language="ru"):
             "• Qayta ishlanmoqda — moliya bo'limi tekshiradi.\n"
             "• Kutilmoqda — order, BYAS, yig'ish, savat va seriyalar tekshiriladi.\n"
             "• Jo'natildi yoki Yetkazildi — yig'ish, savat va seriyalar tekshiriladi.\n"
-            "• Arxivlandi — hujjat o'tkazilishi, EHF holati va imzosi, zarur bo'lsa shartnoma tekshiriladi.\n\n"
+            "• Arxivlandi — hujjat, EHF, shartnoma va TMSdagi TTN tekshiriladi.\n\n"
             "Order yoki BYAS topilmasa, yig'ish tugallanmagan bo'lsa, savatda tovar qolsa "
             "yoki seriyalar mos kelmasa — omborga murojaat qiling.\n\n"
-            "TMS tekshiruvi vaqtincha o'chirilgan."
+            "TMSdagi muammolar umumiy natijaga ta'sir qilmaydi va alohida xabarda ko'rsatiladi."
         )
     return (
         "Как пользоваться ботом:\n\n"
@@ -279,10 +303,10 @@ def help_text(language="ru"):
         "• В обработке — проверка финансовым отделом.\n"
         "• В ожидании — проверяются ордер, БЯС, сборка, корзина и серии.\n"
         "• Отгружен или Доставлен — проверяются сборка, корзина и серии.\n"
-        "• Архивирован — проверяются проведение документа, статус и подпись ЭСФ, при необходимости договор.\n\n"
+        "• Архивирован — проверяются документ, ЭСФ, договор и ТТН в TMS.\n\n"
         "Если ордер или БЯС не найдены, сборка не завершена, в корзине остался товар "
         "или серии не совпали — обратитесь на склад.\n\n"
-        "Проверка TMS временно отключена."
+        "Проблемы TMS не влияют на общий итог и приходят отдельным сообщением."
     )
 
 
@@ -338,6 +362,15 @@ UZ_REPLACEMENTS = {
     "Не удалось получить данные из WMS": "WMSdan ma'lumot olib bo'lmadi",
     "Бухгалтерия недоступна, статус ЭСФ не проверен": "Buxgalteriya ishlamayapti, EHF holati tekshirilmadi",
     "Бухгалтерия недоступна": "Buxgalteriya ishlamayapti",
+    "TMS недоступна, ТТН не проверена": "TMS ishlamayapti, TTN tekshirilmadi",
+    "Повторить проверку или обратиться в логистику": "Tekshiruvni takrorlash yoki logistikaga murojaat qilish",
+    "Документ отгрузки не найден в TMS": "Jo'natma hujjati TMSda topilmadi",
+    "Логистика должна проверить документ отгрузки": "Logistika jo'natma hujjatini tekshirishi kerak",
+    "Путевой лист не привязан к отгрузке": "Yo'l varaqasi jo'natmaga biriktirilmagan",
+    "Логистика должна привязать путевой лист к отгрузке": "Logistika yo'l varaqasini jo'natmaga biriktirishi kerak",
+    "ТТН не прошла, причина не передана TMS": "TTN o'tmadi, sabab TMS tomonidan berilmadi",
+    "ТТН не прошла": "TTN o'tmadi",
+    "Логистика должна исправить ошибку ТТН и отправить её повторно": "Logistika TTN xatosini tuzatib, uni qayta yuborishi kerak",
     "Невозможно определить, какую систему нужно проверять": "Qaysi tizimni tekshirish kerakligini aniqlab bo'lmaydi",
     "Проверьте правильность номера заявки": "Ariza raqami to'g'riligini tekshiring",
     "Если номер верный — обратитесь к оператору": "Raqam to'g'ri bo'lsa, operatorga murojaat qiling",
@@ -488,6 +521,7 @@ UZ_REPLACEMENTS = {
     "Самые активные пользователи": "Eng faol foydalanuvchilar",
     " дн.": " kun",
     "бухгалтерия": "buxgalteriya",
+    "логистика": "logistika",
     "оператор": "operator",
     "склад": "ombor",
     "администратор интеграции": "integratsiya administratori",
@@ -1993,6 +2027,110 @@ def format_accounting(accounting):
     }
 
 
+def first_text(data, *fields):
+    for field in fields:
+        value = str(data.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def tms_transport_text(tms):
+    direct = first_text(tms, "transport", "vehicle", "car", "automobile")
+    if direct:
+        return direct
+    model = first_text(tms, "transport_model", "vehicle_model", "car_model")
+    number = first_text(
+        tms, "transport_number", "vehicle_number", "car_number",
+        "state_number", "plate_number",
+    )
+    return " ".join(part for part in (model, number) if part)
+
+
+def format_tms_card(tms, region_name, responsible="", language="ru"):
+    """Build a separate shipment card for the accounting stage."""
+    language = normalized_language(language)
+    region_name = str(region_name or "TMS").strip()
+    lines = [message_text(language, "tms.card.header", region=region_name)]
+    owner = str(responsible or "логистика").strip()
+
+    if tms.get("_error"):
+        error = localize_text(describe_error(tms["_error"]), language)
+        lines.append(message_text(language, "tms.card.unavailable", error=error))
+        return {
+            "text": "\n".join(lines),
+            "send": True,
+            "problems": 0,
+            "unavailable": 1,
+            "reason": "TMS недоступна, ТТН не проверена",
+            "action": "Повторить проверку или обратиться в логистику",
+            "owner": owner,
+        }
+
+    if not bool_value(tms, "order_found", "document_found"):
+        lines.append(message_text(language, "tms.card.not_found"))
+        return {
+            "text": "\n".join(lines),
+            "send": True,
+            "problems": 1,
+            "unavailable": 0,
+            "reason": "Документ отгрузки не найден в TMS",
+            "action": "Логистика должна проверить документ отгрузки",
+            "owner": owner,
+        }
+
+    waybill_fields = ("waybill_found", "waybill_linked")
+    if any(field in tms for field in waybill_fields) and not bool_value(tms, *waybill_fields):
+        return {
+            "text": message_text(language, "tms.card.waybill_missing"),
+            "send": True,
+            "problems": 1,
+            "unavailable": 0,
+            "reason": "Путевой лист не привязан к отгрузке",
+            "action": "Логистика должна привязать путевой лист к отгрузке",
+            "owner": owner,
+        }
+
+    driver = first_text(tms, "driver", "driver_name")
+    transport = tms_transport_text(tms)
+    lines.append(message_text(
+        language, "tms.card.driver", value=driver,
+    ) if driver else message_text(language, "tms.card.driver_missing"))
+    lines.append(message_text(
+        language, "tms.card.transport", value=transport,
+    ) if transport else message_text(language, "tms.card.transport_missing"))
+
+    if bool_value(tms, "ttn_sent", "ttn_passed", "ttn_accepted"):
+        lines.append(message_text(language, "tms.card.ttn_sent"))
+        return {
+            "text": "\n".join(lines),
+            "send": False,
+            "problems": 0,
+            "unavailable": 0,
+            "reason": "",
+            "action": "",
+            "owner": "",
+        }
+
+    lines.append(message_text(language, "tms.card.ttn_failed"))
+    reason = first_text(
+        tms, "ttn_error", "ttn_error_reason", "ttn_failure_reason",
+        "ttn_reason", "error_reason", "send_error",
+    )
+    lines.append(message_text(
+        language, "tms.card.ttn_reason", value=reason,
+    ) if reason else message_text(language, "tms.card.ttn_reason_missing"))
+    return {
+        "text": "\n".join(lines),
+        "send": True,
+        "problems": 1,
+        "unavailable": 0,
+        "reason": f"ТТН не прошла: {reason}" if reason else "ТТН не прошла, причина не передана TMS",
+        "action": "Логистика должна исправить ошибку ТТН и отправить её повторно",
+        "owner": owner,
+    }
+
+
 def wms_summary(wms, status_code, series_check=None, responsible=""):
     normalized = normalize_wms(wms)
     owner = str(responsible or "склад").strip()
@@ -2061,6 +2199,57 @@ def apply_wms_fallback_routing(results, configured_regions):
             warehouse_names.append(warehouse_name)
 
     results["wms_matched_regions"] = matched_names
+    results["warehouse_names"] = warehouse_names
+
+
+def apply_tms_fallback_routing(results, configured_regions):
+    """Select the TMS region that found the shipment when warehouse routing is unknown."""
+    results["tms_matched_regions"] = []
+    if results.get("warehouse_routing_exact", True):
+        return
+
+    matched_indexes = []
+    for index, item in enumerate(results.get("regions", [])):
+        if not item.get("selected", True):
+            continue
+        tms = item.get("tms", {})
+        if (
+            isinstance(tms, dict)
+            and not tms.get("_error")
+            and bool_value(tms, "order_found", "document_found")
+        ):
+            matched_indexes.append(index)
+
+    if not matched_indexes:
+        candidates = [
+            item.get("tms", {}) for item in results.get("regions", [])
+            if item.get("selected", True) and isinstance(item.get("tms"), dict)
+        ]
+        if candidates:
+            # One aggregate card is clearer than one "not found" message per region.
+            results["tms_fallback_result"] = next(
+                (item for item in candidates if not item.get("_error")), candidates[0]
+            )
+            for item in results.get("regions", []):
+                item["selected"] = False
+        return
+
+    matched_names = []
+    warehouse_names = list(results.get("warehouse_names", []))
+    for index, item in enumerate(results.get("regions", [])):
+        selected = index in matched_indexes
+        item["selected"] = selected
+        if not selected:
+            continue
+        region = configured_regions[index] if index < len(configured_regions) else {}
+        name = str(item.get("name") or region.get("name") or "").strip()
+        if name and name not in matched_names:
+            matched_names.append(name)
+        warehouse_name = str(region.get("warehouse_name") or name).strip()
+        if warehouse_name and warehouse_name not in warehouse_names:
+            warehouse_names.append(warehouse_name)
+
+    results["tms_matched_regions"] = matched_names
     results["warehouse_names"] = warehouse_names
 
 
@@ -2197,6 +2386,25 @@ def format_result(doc_number, results, language="ru"):
             for owner in accounting_result["responsible_people"]:
                 add_unique(responsible_people, owner)
 
+            tms_cards = []
+            region_results = [item for item in results.get("regions", []) if item.get("selected", True)]
+            if "tms_fallback_result" in results:
+                region_results.append({
+                    "name": "TMS",
+                    "tms": results["tms_fallback_result"],
+                    "tms_responsible": "логистика",
+                })
+            for item in region_results:
+                if "tms" not in item:
+                    continue
+                card = format_tms_card(
+                    item.get("tms", {}), item.get("name", "TMS"),
+                    item.get("tms_responsible", ""), language,
+                )
+                if card["send"]:
+                    tms_cards.append(card["text"])
+            results["_mini_messages"] = tms_cards
+
         else:
             lines.append(message_text(language, "status.unknown"))
             lines.append(message_text(language, "status.admin_owner"))
@@ -2262,6 +2470,7 @@ def check_order(config, doc_number, language="ru"):
         result = {
             "text": cached_result["text"] + "\n" + message_text(language, "result.cache"),
             "tables": cached_result.get("tables", []),
+            "mini_messages": cached_result.get("mini_messages", []),
             "summary": dict(cached_result.get("summary", {})),
             "from_cache": True,
         }
@@ -2334,8 +2543,13 @@ def check_order(config, doc_number, language="ru"):
 
     need_accounting = status_code == "A"
     need_wms = status_code in ("B#W", "B#S", "B#V")
+    need_tms = status_code == "A"
 
-    max_workers = min(20, max(1, int(need_accounting) + len(regions) * int(need_wms)))
+    max_workers = min(20, max(
+        1, int(need_accounting)
+        + len(indexes_to_check) * int(need_wms)
+        + len(indexes_to_check) * int(need_tms),
+    ))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         jobs = {}
 
@@ -2346,6 +2560,8 @@ def check_order(config, doc_number, language="ru"):
             region = regions[index]
             if need_wms:
                 jobs[pool.submit(request_wms, region.get("wms", {}), doc_number, timeout)] = ("region", "wms", index)
+            if need_tms:
+                jobs[pool.submit(request_json, region.get("tms", {}), doc_number, timeout)] = ("region", "tms", index)
 
         for job in as_completed(jobs):
             scope, service_name, index = jobs[job]
@@ -2361,6 +2577,8 @@ def check_order(config, doc_number, language="ru"):
 
     if need_wms:
         apply_wms_fallback_routing(results, regions)
+    if need_tms:
+        apply_tms_fallback_routing(results, regions)
 
     if need_wms and not smartup.get("_error"):
         for item in results["regions"]:
@@ -2380,6 +2598,7 @@ def check_order(config, doc_number, language="ru"):
     result = {
         "text": answer,
         "tables": collect_wms_tables(results, language),
+        "mini_messages": results.get("_mini_messages", []),
         "summary": results.get("_summary", {}),
         "from_cache": False,
     }
@@ -2657,6 +2876,11 @@ def send_batch_check(config, message, document_numbers, language="ru"):
         chunks = split_telegram_text(heading + result["text"])
         for chunk in chunks:
             params = {"chat_id": chat_id, "text": chunk}
+            if reply_parameters:
+                params["reply_parameters"] = reply_parameters
+            telegram_call(token, "sendMessage", params)
+        for mini_message in result.get("mini_messages", []):
+            params = {"chat_id": chat_id, "text": mini_message}
             if reply_parameters:
                 params["reply_parameters"] = reply_parameters
             telegram_call(token, "sendMessage", params)

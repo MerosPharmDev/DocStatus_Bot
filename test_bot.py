@@ -291,6 +291,175 @@ class BotTests(unittest.TestCase):
         self.assertEqual(text, "✅ Бухгалтерия: документ проведён\n✅ ЭСФ: Подписан клиентом")
         self.assertEqual(result["problems"], 0)
 
+    def test_tms_card_shows_transport_and_ttn_failure_reason(self):
+        tms = {
+            "order_found": True,
+            "driver": "Иванов И.И.",
+            "transport": "Isuzu 01 A 123 BC",
+            "ttn_sent": False,
+            "ttn_error": "Не заполнен номер доверенности",
+        }
+        result = bot.format_tms_card(tms, "Ташкент", "Логистика Ташкент")
+
+        self.assertIn("🚚 Отгрузка", result["text"])
+        self.assertNotIn("Ташкент", result["text"])
+        self.assertIn("👤 Водитель: Иванов И.И.", result["text"])
+        self.assertIn("🚛 Транспорт: Isuzu 01 A 123 BC", result["text"])
+        self.assertIn("❌ ТТН не прошла", result["text"])
+        self.assertIn("Причина: Не заполнен номер доверенности", result["text"])
+        self.assertEqual(result["problems"], 1)
+        self.assertEqual(result["owner"], "Логистика Ташкент")
+
+        uzbek = bot.format_tms_card(tms, "Toshkent", "Toshkent logistikasi", "uz")["text"]
+        self.assertIn("👤 Haydovchi: Иванов И.И.", uzbek)
+        self.assertIn("🚛 Transport: Isuzu 01 A 123 BC", uzbek)
+        self.assertIn("❌ TTN o'tmadi", uzbek)
+        self.assertIn("⚠️ Sabab: Не заполнен номер доверенности", uzbek)
+
+    def test_successful_ttn_keeps_old_tms_contract_compatible(self):
+        result = bot.format_tms_card({
+            "order_found": True,
+            "driver": "Иванов И.И.",
+            "ttn_sent": True,
+        }, "Наманган")
+
+        self.assertIn("Транспорт не передан сервисом TMS", result["text"])
+        self.assertIn("✅ ТТН отправлена", result["text"])
+        self.assertFalse(result["send"])
+        self.assertEqual(result["problems"], 0)
+
+    def test_tms_card_reports_missing_waybill_without_false_field_warnings(self):
+        result = bot.format_tms_card({
+            "order_found": True,
+            "waybill_found": False,
+            "driver": "",
+            "transport": "",
+            "ttn_sent": False,
+            "ttn_error": "",
+        }, "Наманган", "Логистика Наманган")
+
+        self.assertEqual(result["text"], "❌ TMS: путевой лист не привязан")
+        self.assertTrue(result["send"])
+        self.assertEqual(result["problems"], 1)
+        self.assertEqual(result["action"], "Логистика должна привязать путевой лист к отгрузке")
+
+    def test_tms_fallback_uses_one_aggregate_card_when_document_is_not_found(self):
+        results = {
+            "warehouse_routing_exact": False,
+            "regions": [
+                {"name": "Ташкент", "selected": True, "tms": {"order_found": False}},
+                {"name": "Наманган", "selected": True, "tms": {"order_found": False}},
+            ],
+        }
+
+        bot.apply_tms_fallback_routing(results, [{}, {}])
+
+        self.assertIn("tms_fallback_result", results)
+        self.assertFalse(any(item["selected"] for item in results["regions"]))
+
+    def test_accounting_stage_builds_separate_tms_card_without_changing_summary(self):
+        results = {
+            "smartup": {
+                "document_found": True,
+                "status_code": "A",
+                "status": "Архивирован",
+                "order": {},
+            },
+            "accounting": {
+                "document_found": True,
+                "document_posted": True,
+                "invoice_status": "Подписан",
+                "invoice_sent": True,
+            },
+            "regions": [{
+                "name": "Ташкент",
+                "selected": True,
+                "tms_responsible": "Логистика Ташкент",
+                "tms": {
+                    "order_found": True,
+                    "driver": "Иванов И.И.",
+                    "transport": "Isuzu 01 A 123 BC",
+                    "ttn_sent": False,
+                    "ttn_error": "Ошибка доверенности",
+                },
+            }],
+            "warehouse_codes": ["4"],
+            "warehouse_names": ["Склад Ташкент"],
+            "_elapsed": 0,
+        }
+
+        text = bot.format_result("123", results)
+
+        self.assertNotIn("🚚 Отгрузка", text)
+        self.assertEqual(len(results["_mini_messages"]), 1)
+        self.assertIn("Ошибка доверенности", results["_mini_messages"][0])
+        self.assertEqual(results["_summary"]["outcome"], "ok")
+        self.assertNotIn("ТТН не прошла: Ошибка доверенности", results["_summary"]["problem_reasons"])
+
+    def test_successful_ttn_does_not_build_a_separate_message(self):
+        results = {
+            "smartup": {
+                "document_found": True,
+                "status_code": "A",
+                "status": "Архивирован",
+                "order": {},
+            },
+            "accounting": {
+                "document_found": True,
+                "document_posted": True,
+                "invoice_status": "Подписан",
+                "invoice_sent": True,
+            },
+            "regions": [{
+                "name": "Наманган",
+                "selected": True,
+                "tms": {
+                    "order_found": True,
+                    "driver": "Иванов И.И.",
+                    "ttn_sent": True,
+                },
+            }],
+            "warehouse_codes": ["8"],
+            "warehouse_names": ["Склад Наманган"],
+            "_elapsed": 0,
+        }
+
+        bot.format_result("4544666", results)
+
+        self.assertEqual(results["_mini_messages"], [])
+        self.assertEqual(results["_summary"]["outcome"], "ok")
+
+    def test_tms_unavailable_is_separate_and_does_not_change_accounting_summary(self):
+        results = {
+            "smartup": {
+                "document_found": True,
+                "status_code": "A",
+                "status": "Архивирован",
+                "order": {},
+            },
+            "accounting": {
+                "document_found": True,
+                "document_posted": True,
+                "invoice_status": "Подписан",
+                "invoice_sent": True,
+            },
+            "regions": [{
+                "name": "Ташкент",
+                "selected": True,
+                "tms": {"_error": "timeout"},
+            }],
+            "warehouse_codes": ["4"],
+            "warehouse_names": ["Склад Ташкент"],
+            "_elapsed": 0,
+        }
+
+        text = bot.format_result("123", results)
+
+        self.assertIn("✅ ИТОГ: ОШИБОК НЕ НАЙДЕНО", text)
+        self.assertEqual(results["_summary"]["outcome"], "ok")
+        self.assertEqual(len(results["_mini_messages"]), 1)
+        self.assertIn("TMS недоступна", results["_mini_messages"][0])
+
     def test_unsigned_invoice_shows_successful_contract_check(self):
         result = bot.format_accounting({
             "document_found": True,
