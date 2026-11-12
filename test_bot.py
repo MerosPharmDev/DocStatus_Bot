@@ -122,9 +122,26 @@ class BotTests(unittest.TestCase):
         bot.apply_wms_fallback_routing(results, configured)
         text = bot.format_result("42", results)
 
-        self.assertIn("Склад определён по данным WMS: Наманган", text)
+        self.assertNotIn("Склад определён по данным WMS", text)
+        self.assertIn("📍 Регион: Наманган", text)
         self.assertNotIn("Недоступный", text)
         self.assertNotIn("timeout", text)
+
+    def test_wms_fallback_does_not_duplicate_smartup_warehouse_name(self):
+        results = {
+            "warehouse_routing_exact": False,
+            "warehouse_names": ["Склад_ЛПУ_Карши"],
+            "regions": [{
+                "name": "Карши", "selected": True,
+                "wms": {"document_found": True},
+            }],
+        }
+        configured = [{"name": "Карши", "warehouse_name": "Склад Карши"}]
+
+        bot.apply_wms_fallback_routing(results, configured)
+
+        self.assertEqual(results["warehouse_names"], ["Склад_ЛПУ_Карши"])
+        self.assertEqual(results["wms_matched_regions"], ["Карши"])
 
     def test_processing_order_has_pending_outcome_in_both_languages(self):
         for language, expected in (("ru", "ИТОГ: ЗАЯВКА В РАБОТЕ"), ("uz", "YAKUN: ARIZA JARAYONDA")):
@@ -190,7 +207,7 @@ class BotTests(unittest.TestCase):
         self.assertFalse(any("Количество не совпало: Test product" in line for line in lines))
         self.assertEqual((problems, unavailable), (1, 0))
 
-    def test_series_comparison_keeps_original_wms_quantity_after_full_return(self):
+    def test_fully_returned_item_assembled_in_byas_is_an_error(self):
         smartup = {
             "order": {
                 "order_products": [{
@@ -216,9 +233,11 @@ class BotTests(unittest.TestCase):
         result = bot.compare_series(smartup, wms)
 
         self.assertTrue(result["available"])
-        self.assertTrue(result["matches"])
-        self.assertEqual(result["issues"], [])
-        self.assertEqual(result["items"], [])
+        self.assertFalse(result["matches"])
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["problem"], "Собран возвращенный товар")
+        self.assertEqual(result["items"][0]["smartup_quantity"], "2")
+        self.assertEqual(result["items"][0]["wms_quantity"], "2")
 
     def test_series_comparison_reconstructs_original_quantity_when_order_quantity_is_missing(self):
         smartup = {
@@ -238,7 +257,13 @@ class BotTests(unittest.TestCase):
                 "product_code": "A1",
                 "product_name": "Partially returned product",
                 "series": "S1",
-                "quantity": 5,
+                "quantity": 3,
+            }],
+            "return_basket_items": [{
+                "product_code": "A1",
+                "product_name": "Partially returned product",
+                "series": "S1",
+                "quantity": 2,
             }],
         }
 
@@ -246,6 +271,162 @@ class BotTests(unittest.TestCase):
 
         self.assertTrue(result["matches"])
         self.assertEqual(result["issues"], [])
+
+    def test_returned_wms_basket_items_are_not_errors_and_cover_series_shortage(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1",
+                    "product_name": "Returned product",
+                    "card_code": "S1",
+                    "order_quant": 5,
+                    "sold_quant": 3,
+                    "return_quant": 2,
+                }]
+            }
+        }
+        wms = {
+            "document_found": True,
+            "assembly_found": True,
+            "assembled": False,
+            "assembly_finished": True,
+            "basket_has_items": True,
+            "basket_quantity": 2,
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1", "product_name": "Returned product",
+                "series": "S1", "quantity": 3,
+            }],
+            "basket_items": [{
+                "product_code": "A1", "product_name": "Returned product",
+                "series": "S1", "basket_quantity": 2,
+            }],
+            "unassembled_items": [],
+        }
+
+        reconciled = bot.reconcile_wms_return_basket(smartup, wms)
+        comparison = bot.compare_series(smartup, reconciled)
+
+        self.assertFalse(reconciled["basket_has_items"])
+        self.assertEqual(reconciled["basket_quantity"], 0)
+        self.assertEqual(reconciled["basket_items"], [])
+        self.assertEqual(reconciled["return_basket_quantity"], 2)
+        self.assertTrue(comparison["matches"])
+
+    def test_basket_is_ignored_for_non_lpu_work_zone(self):
+        wms = {
+            "document_found": True, "assembly_found": True, "assembled": False,
+            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 5,
+            "assembly_items": [], "basket_items": [{
+                "product_code": "A1", "series": "S1", "basket_quantity": 5,
+            }], "unassembled_items": [],
+        }
+
+        ignored = bot.ignore_wms_basket(wms)
+
+        self.assertFalse(ignored["basket_has_items"])
+        self.assertEqual(ignored["basket_quantity"], 0)
+        self.assertEqual(ignored["basket_items"], [])
+        self.assertEqual(len(ignored["ignored_basket_items"]), 1)
+
+    def test_lpu_is_detected_from_smartup_work_zone_not_warehouse(self):
+        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "ЛПУ"}}))
+        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "andijan.lpu"}}))
+        self.assertFalse(bot.is_lpu_work_zone({"order": {"room_name": "andijan.city8"}}))
+
+    def test_basket_quantity_above_return_remains_an_error(self):
+        smartup = {
+            "order": {"order_products": [{
+                "product_code": "A1", "card_code": "S1", "return_quant": 2,
+            }]}
+        }
+        wms = {
+            "document_found": True, "assembly_found": True, "assembled": False,
+            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 3,
+            "assembly_items": [], "basket_items": [{
+                "product_code": "A1", "series": "S1", "basket_quantity": 3,
+            }], "unassembled_items": [],
+        }
+
+        reconciled = bot.reconcile_wms_return_basket(smartup, wms)
+
+        self.assertTrue(reconciled["basket_has_items"])
+        self.assertEqual(reconciled["basket_quantity"], 1)
+        self.assertEqual(reconciled["basket_items"][0]["basket_quantity"], 1)
+
+    def test_blank_basket_series_is_never_hidden_as_a_return(self):
+        smartup = {
+            "order": {"order_products": [{
+                "product_code": "A1", "card_code": "S1", "return_quant": 2,
+            }]}
+        }
+        wms = {
+            "document_found": True, "assembly_found": True, "assembled": False,
+            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 2,
+            "assembly_items": [], "basket_items": [{
+                "product_code": "A1", "product_name": "No series",
+                "series": "", "basket_quantity": 2,
+            }], "unassembled_items": [],
+        }
+
+        reconciled = bot.reconcile_wms_return_basket(smartup, wms)
+        lines, problems, unavailable = bot.format_wms(reconciled, "B#V")
+
+        self.assertTrue(reconciled["basket_has_items"])
+        self.assertEqual(reconciled["return_basket_items"], [])
+        self.assertTrue(any("В WMS не заполнен номер серии" in line for line in lines))
+        self.assertEqual((problems, unavailable), (1, 0))
+
+    def test_blank_assembly_series_is_reported_without_false_missing_item(self):
+        smartup = {
+            "order": {"order_products": [{
+                "product_code": "A1", "product_name": "No series product",
+                "card_code": "S1", "order_quant": 2, "sold_quant": 2,
+                "return_quant": 0,
+            }]}
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1", "product_name": "No series product",
+                "series": "", "quantity": 2,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
+        self.assertFalse(result["matches"])
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["problem"], "В WMS не заполнен номер серии")
+        self.assertEqual(result["items"][0]["smartup_quantity"], "2")
+        self.assertEqual(result["items"][0]["wms_quantity"], "2")
+        self.assertFalse(any("Нет в сборке" in issue for issue in result["issues"]))
+
+    def test_blank_smartup_series_is_a_directory_error_not_extra_wms_series(self):
+        smartup = {
+            "order": {"order_products": [{
+                "product_code": "A1", "product_name": "Smartup blank series",
+                "card_code": "", "order_quant": 2, "sold_quant": 2,
+                "return_quant": 0,
+            }]}
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1", "product_name": "Smartup blank series",
+                "series": "S1", "quantity": 2,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
+        self.assertFalse(result["matches"])
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["problem"], "В Smartup не заполнен номер серии")
+        self.assertEqual(result["items"][0]["series"], "S1")
+        self.assertEqual(result["items"][0]["smartup_quantity"], "2")
+        self.assertEqual(result["items"][0]["wms_quantity"], "2")
+        self.assertFalse(any("Лишняя серия в сборке" in issue for issue in result["issues"]))
 
     def test_uzbek_keyboard_and_result_translation(self):
         keyboard = bot.main_keyboard(True, "uz")
@@ -306,7 +487,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("👤 Водитель: Иванов И.И.", result["text"])
         self.assertIn("🚛 Транспорт: Isuzu 01 A 123 BC", result["text"])
         self.assertIn("❌ ТТН не прошла", result["text"])
-        self.assertIn("Причина: Не заполнен номер доверенности", result["text"])
+        self.assertIn("⚠️ Причина:\n<b>Не заполнен номер доверенности</b>", result["text"])
         self.assertEqual(result["problems"], 1)
         self.assertEqual(result["owner"], "Логистика Ташкент")
 
@@ -314,7 +495,14 @@ class BotTests(unittest.TestCase):
         self.assertIn("👤 Haydovchi: Иванов И.И.", uzbek)
         self.assertIn("🚛 Transport: Isuzu 01 A 123 BC", uzbek)
         self.assertIn("❌ TTN o'tmadi", uzbek)
-        self.assertIn("⚠️ Sabab: Не заполнен номер доверенности", uzbek)
+        self.assertIn("⚠️ Sabab:\n<b>Не заполнен номер доверенности</b>", uzbek)
+
+        escaped = bot.format_tms_card({
+            "order_found": True,
+            "ttn_sent": False,
+            "ttn_error": "Ошибка <ТТН> & повтор",
+        }, "Ташкент")["text"]
+        self.assertIn("<b>Ошибка &lt;ТТН&gt; &amp; повтор</b>", escaped)
 
     def test_successful_ttn_keeps_old_tms_contract_compatible(self):
         result = bot.format_tms_card({
@@ -640,6 +828,32 @@ class BotTests(unittest.TestCase):
             self.assertTrue(any(method == "sendChatAction" for method, _ in calls))
             self.assertFalse(any(method == "editMessageText" for method, _ in calls))
             self.assertEqual(sum(method == "sendMessage" for method, _ in calls), 1)
+        finally:
+            bot.telegram_call = old_telegram_call
+            bot.check_orders = old_check_orders
+            bot.save_check_audit = old_save_check_audit
+
+    def test_tms_mini_message_is_sent_with_html_formatting(self):
+        calls = []
+        old_telegram_call = bot.telegram_call
+        old_check_orders = bot.check_orders
+        old_save_check_audit = bot.save_check_audit
+
+        try:
+            bot.telegram_call = lambda token, method, params, timeout=40: calls.append((method, dict(params))) or {}
+            bot.check_orders = lambda config, numbers, language="ru": [{
+                "text": "Заявка 1",
+                "mini_messages": ["⚠️ Причина:\n<b>Ошибка ТТН</b>"],
+                "tables": [],
+                "summary": {},
+            }]
+            bot.save_check_audit = lambda *args: None
+            message = {"message_id": 10, "chat": {"id": 20}, "from": {"id": 30}}
+
+            bot.send_batch_check({"telegram_bot_token": "token"}, message, ["1"], "ru")
+
+            mini = next(params for method, params in calls if method == "sendMessage" and "Ошибка ТТН" in params.get("text", ""))
+            self.assertEqual(mini["parse_mode"], "HTML")
         finally:
             bot.telegram_call = old_telegram_call
             bot.check_orders = old_check_orders

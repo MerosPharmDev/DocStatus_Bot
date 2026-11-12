@@ -104,7 +104,7 @@ MESSAGES = {
         "tms.card.transport_missing": "⚠️ Транспорт не передан сервисом TMS",
         "tms.card.ttn_sent": "✅ ТТН отправлена",
         "tms.card.ttn_failed": "❌ ТТН не прошла",
-        "tms.card.ttn_reason": "⚠️ Причина: {value}",
+        "tms.card.ttn_reason": "⚠️ Причина:\n<b>{value}</b>",
         "tms.card.ttn_reason_missing": "⚠️ Причина ошибки не передана сервисом TMS",
     },
     "uz": {
@@ -160,7 +160,7 @@ MESSAGES = {
         "tms.card.transport_missing": "⚠️ Transport TMS xizmati tomonidan berilmagan",
         "tms.card.ttn_sent": "✅ TTN yuborildi",
         "tms.card.ttn_failed": "❌ TTN o'tmadi",
-        "tms.card.ttn_reason": "⚠️ Sabab: {value}",
+        "tms.card.ttn_reason": "⚠️ Sabab:\n<b>{value}</b>",
         "tms.card.ttn_reason_missing": "⚠️ Xato sababi TMS xizmati tomonidan berilmagan",
     },
 }
@@ -431,9 +431,11 @@ UZ_REPLACEMENTS = {
     "Smartup вернул пустой список товаров": "Smartup bo'sh tovarlar ro'yxatini berdi",
     "В Smartup есть товар без product_code": "Smartupda product_codesiz tovar bor",
     "В Smartup не указана серия": "Smartupda seriya ko'rsatilmagan",
+    "В Smartup не заполнен номер серии": "Smartupda seriya raqami to'ldirilmagan",
     "В Smartup не указано количество": "Smartupda miqdor ko'rsatilmagan",
     "В WMS есть строка сборки без product_code": "WMS yig'imida product_codesiz qator bor",
     "В WMS не указана серия": "WMSda seriya ko'rsatilmagan",
+    "В WMS не заполнен номер серии": "WMSda seriya raqami to'ldirilmagan",
     "В WMS не указано количество": "WMSda miqdor ko'rsatilmagan",
     "WMS: расходный ордер найден": "WMS: chiqim orderi topildi",
     "WMS: расходный ордер не найден": "WMS: chiqim orderi topilmadi",
@@ -441,6 +443,7 @@ UZ_REPLACEMENTS = {
     "Нет в сборке": "Yig'imda yo'q",
     "Лишняя серия в сборке": "Yig'imdagi ortiqcha seriya",
     "Количество не совпало": "Miqdor mos emas",
+    "Собран возвращенный товар": "Qaytarilgan tovar yig'ilgan",
     "ожидалось": "kutilgan",
     "количество": "miqdor",
     "серия": "seriya",
@@ -1254,6 +1257,126 @@ def format_wms_items(items, quantity_field, limit=10):
     return lines
 
 
+def native_quantity(value):
+    value = Decimal(value)
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+def smartup_return_quantities(smartup):
+    order = smartup.get("order", {})
+    products = order.get("order_products", []) if isinstance(order, dict) else []
+    returned = {}
+    if not isinstance(products, list):
+        return returned
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        code = str(product.get("product_code") or "").strip()
+        series = str(product.get("card_code") or "").strip()
+        if not code or not series:
+            continue
+        try:
+            quantity = decimal_value(product.get("return_quant"))
+        except (InvalidOperation, ValueError):
+            continue
+        if quantity <= 0:
+            continue
+        key = series_key(code, series)
+        returned[key] = returned.get(key, Decimal(0)) + quantity
+    return returned
+
+
+def reconcile_wms_return_basket(smartup, wms):
+    """Remove only basket quantities confirmed as returns by product and series."""
+    if not isinstance(wms, dict) or wms.get("_error"):
+        return wms
+
+    result = dict(wms)
+    allowed_returns = smartup_return_quantities(smartup)
+    used_returns = {}
+    accepted_items = []
+    problem_items = []
+    accepted_total = Decimal(0)
+
+    basket_items = wms.get("basket_items", [])
+    if not isinstance(basket_items, list):
+        return wms
+
+    for source in basket_items:
+        if not isinstance(source, dict):
+            problem_items.append(source)
+            continue
+        item = dict(source)
+        code = str(item.get("product_code") or "").strip()
+        series = str(item.get("series") or "").strip()
+        try:
+            quantity = decimal_value(item.get("basket_quantity"))
+        except (InvalidOperation, ValueError):
+            problem_items.append(item)
+            continue
+
+        accepted = Decimal(0)
+        if code and series and quantity > 0:
+            key = series_key(code, series)
+            available = max(allowed_returns.get(key, Decimal(0)) - used_returns.get(key, Decimal(0)), Decimal(0))
+            accepted = min(quantity, available)
+            if accepted > 0:
+                used_returns[key] = used_returns.get(key, Decimal(0)) + accepted
+                accepted_item = dict(item)
+                accepted_item["basket_quantity"] = native_quantity(accepted)
+                accepted_item["quantity"] = native_quantity(accepted)
+                accepted_items.append(accepted_item)
+                accepted_total += accepted
+
+        remaining = quantity - accepted
+        if remaining > 0:
+            item["basket_quantity"] = native_quantity(remaining)
+            problem_items.append(item)
+
+    try:
+        original_total = decimal_value(wms.get("basket_quantity"))
+        problem_total = max(original_total - accepted_total, Decimal(0))
+    except (InvalidOperation, ValueError):
+        problem_total = sum(
+            (decimal_value(item.get("basket_quantity")) for item in problem_items if isinstance(item, dict)),
+            Decimal(0),
+        )
+
+    result["basket_items"] = problem_items
+    result["basket_quantity"] = native_quantity(problem_total)
+    result["basket_has_items"] = bool(problem_items) or problem_total > 0
+    result["return_basket_items"] = accepted_items
+    result["return_basket_quantity"] = native_quantity(accepted_total)
+    return normalize_wms(result)
+
+
+def ignore_wms_basket(wms):
+    """Basket has business meaning only for Smartup LPU work zones."""
+    if not isinstance(wms, dict) or wms.get("_error"):
+        return wms
+    result = dict(wms)
+    result["ignored_basket_items"] = list(wms.get("basket_items", []))
+    result["basket_items"] = []
+    result["basket_quantity"] = 0
+    result["basket_has_items"] = False
+    return normalize_wms(result)
+
+
+def is_lpu_work_zone(smartup):
+    order = smartup.get("order", {})
+    if not isinstance(order, dict):
+        return False
+    values = (
+        order.get("room_name"), order.get("room_code"),
+        order.get("work_zone_name"), order.get("work_zone_code"),
+    )
+    for value in values:
+        text = str(value or "").casefold()
+        if re.search(r"(^|[^0-9a-zа-яё])(?:лпу|lpu)([^0-9a-zа-яё]|$)", text):
+            return True
+    return False
+
+
 def compare_series(smartup, wms):
     if not wms.get("assembly_items_available"):
         return {
@@ -1271,9 +1394,13 @@ def compare_series(smartup, wms):
         return {"available": False, "matches": False, "issues": ["Smartup вернул пустой список товаров"], "items": []}
 
     expected = {}
+    expected_sold = {}
+    expected_returns = {}
     actual = {}
     labels = {}
     data_issues = []
+    blank_smartup = {}
+    blank_wms = {}
 
     for product in products:
         if not isinstance(product, dict):
@@ -1298,16 +1425,33 @@ def compare_series(smartup, wms):
         if not code:
             data_issues.append("В Smartup есть товар без product_code")
             continue
-        if not series:
-            data_issues.append(f"В Smartup не указана серия: {name or code}")
-            continue
         try:
             number = decimal_value(quantity)
         except (InvalidOperation, ValueError):
-            data_issues.append(f"В Smartup не указано количество: {name or code}, серия {series}")
+            series_text = f", серия {series}" if series else ""
+            data_issues.append(f"В Smartup не указано количество: {name or code}{series_text}")
+            continue
+        try:
+            return_number = decimal_value(product.get("return_quant", 0))
+        except (InvalidOperation, ValueError):
+            return_number = Decimal(0)
+        try:
+            sold_number = decimal_value(product.get("sold_quant"))
+        except (InvalidOperation, ValueError):
+            sold_number = max(number - return_number, Decimal(0))
+        if not series:
+            code_key = code.casefold()
+            entry = blank_smartup.setdefault(code_key, {"code": code, "name": name, "quantity": Decimal(0)})
+            entry["quantity"] += number
+            if not entry["name"] and name:
+                entry["name"] = name
             continue
         key = series_key(code, series)
-        expected[key] = expected.get(key, Decimal(0)) + number
+        # BYAS must contain only the quantity actually sold. Returned quantity
+        # may remain in the basket for LPU warehouses, but never in assembly.
+        expected[key] = expected.get(key, Decimal(0)) + sold_number
+        expected_sold[key] = expected_sold.get(key, Decimal(0)) + sold_number
+        expected_returns[key] = expected_returns.get(key, Decimal(0)) + max(return_number, Decimal(0))
         labels[key] = (code, series, name)
 
     for item in wms.get("assembly_items", []):
@@ -1317,25 +1461,113 @@ def compare_series(smartup, wms):
         if not code:
             data_issues.append("В WMS есть строка сборки без product_code")
             continue
-        if not series:
-            data_issues.append(f"В WMS не указана серия: {name or code}")
-            continue
         try:
             number = decimal_value(item.get("quantity"))
         except (InvalidOperation, ValueError):
-            data_issues.append(f"В WMS не указано количество: {name or code}, серия {series}")
+            series_text = f", серия {series}" if series else ""
+            data_issues.append(f"В WMS не указано количество: {name or code}{series_text}")
+            continue
+        if not series:
+            code_key = code.casefold()
+            entry = blank_wms.setdefault(code_key, {"code": code, "name": name, "quantity": Decimal(0)})
+            entry["quantity"] += number
+            if not entry["name"] and name:
+                entry["name"] = name
             continue
         key = series_key(code, series)
         actual[key] = actual.get(key, Decimal(0)) + number
         labels.setdefault(key, (code, series, name))
 
+    assembly_actual = dict(actual)
+
     issues = list(dict.fromkeys(data_issues))
     mismatch_items = []
+    blank_handled_keys = set()
+    smartup_blank_actual_keys = set()
+    assembled_return_keys = set()
+
+    for key, return_quantity in expected_returns.items():
+        if return_quantity <= 0:
+            continue
+        assembled_quantity = assembly_actual.get(key, Decimal(0))
+        sold_quantity = expected_sold.get(key, Decimal(0))
+        returned_in_assembly = min(max(assembled_quantity - sold_quantity, Decimal(0)), return_quantity)
+        if returned_in_assembly <= 0:
+            continue
+        code, series, name = labels[key]
+        product = f"{name} ({code})" if name else code
+        problem = "Собран возвращенный товар"
+        issues.append(
+            f"{problem}: {product}, серия {series}, количество {display_quantity(returned_in_assembly)}"
+        )
+        mismatch_items.append({
+            "product_name": name or "Товар без наименования",
+            "product_code": code,
+            "series": series,
+            "smartup_quantity": display_quantity(return_quantity),
+            "wms_quantity": display_quantity(returned_in_assembly),
+            "problem": problem,
+        })
+        assembled_return_keys.add(key)
+
+    for code_key, blank in sorted(blank_smartup.items()):
+        candidates = [key for key in actual if key[0] == code_key and key not in expected]
+        actual_quantity = sum((actual[key] for key in candidates), Decimal(0))
+        series_text = ", ".join(labels[key][1] for key in candidates) if candidates else "—"
+        problem = "В Smartup не заполнен номер серии"
+        if candidates and blank["quantity"] != actual_quantity:
+            problem += "; количество не совпало"
+        product = f"{blank['name']} ({blank['code']})" if blank["name"] else blank["code"]
+        issues.append(f"{problem}: {product}")
+        mismatch_items.append({
+            "product_name": blank["name"] or "Товар без наименования",
+            "product_code": blank["code"],
+            "series": series_text,
+            "smartup_quantity": display_quantity(blank["quantity"]),
+            "wms_quantity": display_quantity(actual_quantity) if candidates else "—",
+            "problem": problem,
+        })
+        smartup_blank_actual_keys.update(candidates)
+
+    for code_key, blank in sorted(blank_wms.items()):
+        candidates = [
+            key for key in expected
+            if key[0] == code_key and expected[key] > actual.get(key, Decimal(0))
+        ]
+        expected_missing = sum(
+            (expected[key] - actual.get(key, Decimal(0)) for key in candidates),
+            Decimal(0),
+        )
+        series_text = ", ".join(labels[key][1] for key in candidates) if candidates else "—"
+        problem = "В WMS не заполнен номер серии"
+        if candidates and expected_missing != blank["quantity"]:
+            problem += "; количество не совпало"
+        product = f"{blank['name']} ({blank['code']})" if blank["name"] else blank["code"]
+        issues.append(f"{problem}: {product}")
+        mismatch_items.append({
+            "product_name": blank["name"] or "Товар без наименования",
+            "product_code": blank["code"],
+            "series": series_text,
+            "smartup_quantity": display_quantity(expected_missing) if candidates else "—",
+            "wms_quantity": display_quantity(blank["quantity"]),
+            "problem": problem,
+        })
+        blank_handled_keys.update(candidates)
+
     for key in sorted(set(expected) | set(actual)):
+        if key in blank_handled_keys or key in smartup_blank_actual_keys:
+            continue
         code, series, name = labels[key]
         product = f"{name} ({code})" if name else code
         expected_quantity = expected.get(key, Decimal(0))
         actual_quantity = actual.get(key, Decimal(0))
+        if key in expected and expected_quantity == 0 and key not in actual:
+            continue
+        if (
+            key in assembled_return_keys
+            and actual_quantity <= expected_sold.get(key, Decimal(0)) + expected_returns.get(key, Decimal(0))
+        ):
+            continue
         if key not in actual:
             problem = "Нет в сборке"
             issues.append(f"{problem}: {product}, серия {series}, ожидалось {display_quantity(expected_quantity)}")
@@ -1455,6 +1687,9 @@ def format_wms(wms, status_code, responsible="", series_check=None):
         basket_items = wms.get("basket_items", [])
         if basket_items:
             lines.append(f"🧺 Позиций в корзине: {len(basket_items)} — таблица ниже")
+            for item in basket_items:
+                if not str(item.get("series") or "").strip():
+                    lines.append(f"   • В WMS не заполнен номер серии: {item_label(item)}")
         else:
             lines.append("⚠️ WMS не вернула состав корзины")
     return lines, problems, 0
@@ -2055,7 +2290,7 @@ def format_tms_card(tms, region_name, responsible="", language="ru"):
     owner = str(responsible or "логистика").strip()
 
     if tms.get("_error"):
-        error = localize_text(describe_error(tms["_error"]), language)
+        error = html.escape(localize_text(describe_error(tms["_error"]), language))
         lines.append(message_text(language, "tms.card.unavailable", error=error))
         return {
             "text": "\n".join(lines),
@@ -2091,8 +2326,8 @@ def format_tms_card(tms, region_name, responsible="", language="ru"):
             "owner": owner,
         }
 
-    driver = first_text(tms, "driver", "driver_name")
-    transport = tms_transport_text(tms)
+    driver = html.escape(first_text(tms, "driver", "driver_name"))
+    transport = html.escape(tms_transport_text(tms))
     lines.append(message_text(
         language, "tms.card.driver", value=driver,
     ) if driver else message_text(language, "tms.card.driver_missing"))
@@ -2118,7 +2353,7 @@ def format_tms_card(tms, region_name, responsible="", language="ru"):
         "ttn_reason", "error_reason", "send_error",
     )
     lines.append(message_text(
-        language, "tms.card.ttn_reason", value=reason,
+        language, "tms.card.ttn_reason", value=html.escape(reason),
     ) if reason else message_text(language, "tms.card.ttn_reason_missing"))
     return {
         "text": "\n".join(lines),
@@ -2185,6 +2420,7 @@ def apply_wms_fallback_routing(results, configured_regions):
 
     matched_names = []
     warehouse_names = list(results.get("warehouse_names", []))
+    has_smartup_warehouse = bool(warehouse_names)
     for index, item in enumerate(results.get("regions", [])):
         selected = index in matched_indexes
         item["selected"] = selected
@@ -2195,7 +2431,7 @@ def apply_wms_fallback_routing(results, configured_regions):
         if name and name not in matched_names:
             matched_names.append(name)
         warehouse_name = str(region.get("warehouse_name") or name).strip()
-        if warehouse_name and warehouse_name not in warehouse_names:
+        if not has_smartup_warehouse and warehouse_name and warehouse_name not in warehouse_names:
             warehouse_names.append(warehouse_name)
 
     results["wms_matched_regions"] = matched_names
@@ -2236,6 +2472,7 @@ def apply_tms_fallback_routing(results, configured_regions):
 
     matched_names = []
     warehouse_names = list(results.get("warehouse_names", []))
+    has_smartup_warehouse = bool(warehouse_names)
     for index, item in enumerate(results.get("regions", [])):
         selected = index in matched_indexes
         item["selected"] = selected
@@ -2246,7 +2483,7 @@ def apply_tms_fallback_routing(results, configured_regions):
         if name and name not in matched_names:
             matched_names.append(name)
         warehouse_name = str(region.get("warehouse_name") or name).strip()
-        if warehouse_name and warehouse_name not in warehouse_names:
+        if not has_smartup_warehouse and warehouse_name and warehouse_name not in warehouse_names:
             warehouse_names.append(warehouse_name)
 
     results["tms_matched_regions"] = matched_names
@@ -2339,11 +2576,7 @@ def format_result(doc_number, results, language="ru"):
             region_results = [item for item in results.get("regions", []) if item.get("selected", True)]
             if not results.get("warehouse_routing_exact", True):
                 matched_names = results.get("wms_matched_regions", [])
-                if matched_names:
-                    lines.append(message_text(
-                        language, "routing.found", names=", ".join(matched_names),
-                    ))
-                else:
+                if not matched_names:
                     lines.append(message_text(language, "routing.scan"))
             if not region_results:
                 lines.append(message_text(language, "wms.no_regions"))
@@ -2536,6 +2769,7 @@ def check_order(config, doc_number, language="ru"):
     results["warehouse_routing_exact"] = bool(matched_region_indexes)
     results["warehouse_names"] = warehouse_names
     results["warehouse_details"] = warehouse_details
+    results["is_lpu_work_zone"] = is_lpu_work_zone(smartup)
 
     indexes_to_check = list(matched_region_indexes) if matched_region_indexes else list(range(len(regions)))
     for index, item in enumerate(results["regions"]):
@@ -2585,6 +2819,11 @@ def check_order(config, doc_number, language="ru"):
             wms = item.get("wms")
             if not isinstance(wms, dict) or wms.get("_error"):
                 continue
+            if results.get("is_lpu_work_zone"):
+                wms = reconcile_wms_return_basket(smartup, wms)
+            else:
+                wms = ignore_wms_basket(wms)
+            item["wms"] = wms
             if (
                 wms.get("document_found")
                 and wms.get("assembly_found")
@@ -2880,7 +3119,7 @@ def send_batch_check(config, message, document_numbers, language="ru"):
                 params["reply_parameters"] = reply_parameters
             telegram_call(token, "sendMessage", params)
         for mini_message in result.get("mini_messages", []):
-            params = {"chat_id": chat_id, "text": mini_message}
+            params = {"chat_id": chat_id, "text": mini_message, "parse_mode": "HTML"}
             if reply_parameters:
                 params["reply_parameters"] = reply_parameters
             telegram_call(token, "sendMessage", params)
