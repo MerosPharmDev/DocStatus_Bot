@@ -1365,6 +1365,76 @@ def reconcile_wms_return_basket(smartup, wms):
     return normalize_wms(result)
 
 
+def reconcile_wms_unassembled_returns(smartup, wms):
+    """Subtract Smartup returns from WMS quantities still marked unassembled."""
+    if not isinstance(wms, dict) or wms.get("_error"):
+        return wms
+
+    source_items = wms.get("unassembled_items", [])
+    if not isinstance(source_items, list) or not source_items:
+        return wms
+
+    available_returns = smartup_return_quantities(smartup)
+    returns_by_code = {}
+    for key, quantity in available_returns.items():
+        if quantity > 0:
+            returns_by_code.setdefault(key[0], []).append(key)
+
+    used_returns = {}
+    remaining_items = []
+    accepted_items = []
+
+    for source in source_items:
+        if not isinstance(source, dict):
+            remaining_items.append(source)
+            continue
+        item = dict(source)
+        code = str(item.get("product_code") or "").strip()
+        series = str(item.get("series") or "").strip()
+        try:
+            quantity = decimal_value(item.get("remaining_quantity"))
+        except (InvalidOperation, ValueError):
+            remaining_items.append(item)
+            continue
+
+        key = None
+        if code and series:
+            candidate = series_key(code, series)
+            if candidate in available_returns:
+                key = candidate
+        elif code:
+            # WMS sometimes omits the series in unassembled_items.  Match by
+            # product only when Smartup has one unambiguous returned series.
+            candidates = returns_by_code.get(code.casefold(), [])
+            if len(candidates) == 1:
+                key = candidates[0]
+
+        accepted = Decimal(0)
+        if key is not None and quantity > 0:
+            available = max(
+                available_returns.get(key, Decimal(0)) - used_returns.get(key, Decimal(0)),
+                Decimal(0),
+            )
+            accepted = min(quantity, available)
+            if accepted > 0:
+                used_returns[key] = used_returns.get(key, Decimal(0)) + accepted
+                accepted_item = dict(item)
+                accepted_item["remaining_quantity"] = native_quantity(accepted)
+                accepted_items.append(accepted_item)
+
+        remaining = quantity - accepted
+        if remaining > 0:
+            item["remaining_quantity"] = native_quantity(remaining)
+            remaining_items.append(item)
+
+    result = dict(wms)
+    result["unassembled_items"] = remaining_items
+    result["returned_unassembled_items"] = accepted_items
+    if source_items and not remaining_items and accepted_items:
+        result["assembly_finished"] = True
+    return normalize_wms(result)
+
+
 def ignore_wms_basket(wms):
     """Outside LPU, basket is not an error but may confirm expected goods."""
     if not isinstance(wms, dict) or wms.get("_error"):
@@ -2836,6 +2906,7 @@ def check_order(config, doc_number, language="ru"):
             wms = item.get("wms")
             if not isinstance(wms, dict) or wms.get("_error"):
                 continue
+            wms = reconcile_wms_unassembled_returns(smartup, wms)
             if results.get("is_lpu_work_zone"):
                 wms = reconcile_wms_return_basket(smartup, wms)
             else:

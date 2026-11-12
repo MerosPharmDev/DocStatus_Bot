@@ -459,6 +459,57 @@ class BotTests(unittest.TestCase):
         self.assertEqual(reconciled["return_basket_quantity"], 2)
         self.assertTrue(comparison["matches"])
 
+    def test_fully_returned_unassembled_item_finishes_wms_assembly(self):
+        smartup = {
+            "order": {"order_products": [{
+                "product_code": "A67882", "product_name": "Fully returned",
+                "card_code": "01072026", "order_quant": 20,
+                "sold_quant": 0, "return_quant": 20,
+            }]}
+        }
+        wms = {
+            "document_found": True, "assembly_found": True, "assembled": False,
+            "assembly_finished": False, "basket_has_items": False, "basket_quantity": 0,
+            "assembly_items": [], "basket_items": [],
+            "unassembled_items": [{
+                "product_code": "A67882", "product_name": "Fully returned",
+                "series": "", "remaining_quantity": 20,
+            }],
+        }
+
+        reconciled = bot.reconcile_wms_unassembled_returns(smartup, bot.normalize_wms(wms))
+        comparison = bot.compare_series(smartup, reconciled)
+
+        self.assertTrue(reconciled["assembly_finished"])
+        self.assertTrue(reconciled["assembled"])
+        self.assertEqual(reconciled["unassembled_items"], [])
+        self.assertEqual(reconciled["returned_unassembled_items"][0]["remaining_quantity"], 20)
+        self.assertTrue(comparison["matches"])
+
+    def test_partial_return_reduces_but_does_not_hide_real_unassembled_quantity(self):
+        smartup = {
+            "order": {"order_products": [{
+                "product_code": "A1", "product_name": "Partial return",
+                "card_code": "S1", "order_quant": 100,
+                "sold_quant": 80, "return_quant": 20,
+            }]}
+        }
+        wms = {
+            "document_found": True, "assembly_found": True, "assembled": False,
+            "assembly_finished": False, "basket_has_items": False, "basket_quantity": 0,
+            "assembly_items": [], "basket_items": [],
+            "unassembled_items": [{
+                "product_code": "A1", "product_name": "Partial return",
+                "series": "S1", "remaining_quantity": 30,
+            }],
+        }
+
+        reconciled = bot.reconcile_wms_unassembled_returns(smartup, bot.normalize_wms(wms))
+
+        self.assertFalse(reconciled["assembly_finished"])
+        self.assertEqual(reconciled["unassembled_items"][0]["remaining_quantity"], 10)
+        self.assertEqual(reconciled["returned_unassembled_items"][0]["remaining_quantity"], 20)
+
     def test_basket_is_ignored_for_non_lpu_work_zone(self):
         wms = {
             "document_found": True, "assembly_found": True, "assembled": False,
