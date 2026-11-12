@@ -42,13 +42,10 @@ WMS:
   "order_found": true,
   "assembly_found": true,
   "assembly_finished": true,
-  "basket_quantity": 0,
-  "basket_has_items": false,
   "assembly_items": [
     {"product_code": "A13581", "product_name": "Товар", "series": "34827282", "quantity": 50}
   ],
-  "unassembled_items": [],
-  "basket_items": []
+  "unassembled_items": []
 }
 ```
 

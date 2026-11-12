@@ -248,6 +248,33 @@ class BotTests(unittest.TestCase):
 
         self.assertIn("не выбрана или помечена на удаление", reason)
 
+    def test_basket_payload_does_not_affect_wms_result_or_tables(self):
+        wms = {
+            "document_found": True,
+            "assembly_found": True,
+            "assembled": True,
+            "assembly_finished": True,
+            "basket_has_items": "invalid and ignored",
+            "basket_quantity": "invalid and ignored",
+            "basket_items": "invalid and ignored",
+            "assembly_items": [],
+            "unassembled_items": [],
+        }
+
+        normalized = bot.normalize_wms(wms)
+        lines, _, unavailable = bot.format_wms(wms, "B#V", series_check={
+            "available": True, "matches": True, "issues": [], "items": [],
+        })
+        tables = bot.collect_wms_tables({
+            "regions": [{"selected": True, "name": "Test", "wms": normalized}],
+        })
+
+        self.assertNotIn("_error", normalized)
+        self.assertTrue(normalized["assembled"])
+        self.assertFalse(any("корзин" in line.casefold() for line in lines))
+        self.assertEqual(unavailable, 0)
+        self.assertEqual(tables, [])
+
     def test_fully_returned_item_assembled_in_byas_is_an_error(self):
         smartup = {
             "order": {
@@ -437,59 +464,12 @@ class BotTests(unittest.TestCase):
                 "series": "S1",
                 "quantity": 3,
             }],
-            "return_basket_items": [{
-                "product_code": "A1",
-                "product_name": "Partially returned product",
-                "series": "S1",
-                "quantity": 2,
-            }],
         }
 
         result = bot.compare_series(smartup, wms)
 
         self.assertTrue(result["matches"])
         self.assertEqual(result["issues"], [])
-
-    def test_returned_wms_basket_items_are_not_errors_and_cover_series_shortage(self):
-        smartup = {
-            "order": {
-                "order_products": [{
-                    "product_code": "A1",
-                    "product_name": "Returned product",
-                    "card_code": "S1",
-                    "order_quant": 5,
-                    "sold_quant": 3,
-                    "return_quant": 2,
-                }]
-            }
-        }
-        wms = {
-            "document_found": True,
-            "assembly_found": True,
-            "assembled": False,
-            "assembly_finished": True,
-            "basket_has_items": True,
-            "basket_quantity": 2,
-            "assembly_items_available": True,
-            "assembly_items": [{
-                "product_code": "A1", "product_name": "Returned product",
-                "series": "S1", "quantity": 3,
-            }],
-            "basket_items": [{
-                "product_code": "A1", "product_name": "Returned product",
-                "series": "S1", "basket_quantity": 2,
-            }],
-            "unassembled_items": [],
-        }
-
-        reconciled = bot.reconcile_wms_return_basket(smartup, wms)
-        comparison = bot.compare_series(smartup, reconciled)
-
-        self.assertFalse(reconciled["basket_has_items"])
-        self.assertEqual(reconciled["basket_quantity"], 0)
-        self.assertEqual(reconciled["basket_items"], [])
-        self.assertEqual(reconciled["return_basket_quantity"], 2)
-        self.assertTrue(comparison["matches"])
 
     def test_fully_returned_unassembled_item_finishes_wms_assembly(self):
         smartup = {
@@ -541,112 +521,6 @@ class BotTests(unittest.TestCase):
         self.assertFalse(reconciled["assembly_finished"])
         self.assertEqual(reconciled["unassembled_items"][0]["remaining_quantity"], 10)
         self.assertEqual(reconciled["returned_unassembled_items"][0]["remaining_quantity"], 20)
-
-    def test_basket_is_ignored_for_non_lpu_work_zone(self):
-        wms = {
-            "document_found": True, "assembly_found": True, "assembled": False,
-            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 5,
-            "assembly_items": [], "basket_items": [{
-                "product_code": "A1", "series": "S1", "basket_quantity": 5,
-            }], "unassembled_items": [],
-        }
-
-        ignored = bot.ignore_wms_basket(wms)
-
-        self.assertFalse(ignored["basket_has_items"])
-        self.assertEqual(ignored["basket_quantity"], 0)
-        self.assertEqual(ignored["basket_items"], [])
-        self.assertEqual(len(ignored["ignored_basket_items"]), 1)
-
-    def test_non_lpu_basket_covers_expected_goods_without_flagging_returned_extras(self):
-        smartup = {
-            "order": {"order_products": [
-                {
-                    "product_code": "SOLD", "product_name": "Sold product",
-                    "card_code": "S1", "order_quant": 5,
-                    "sold_quant": 5, "return_quant": 0,
-                },
-                {
-                    "product_code": "RETURNED", "product_name": "Returned product",
-                    "card_code": "S2", "order_quant": 2,
-                    "sold_quant": 0, "return_quant": 2,
-                },
-            ]}
-        }
-        wms = {
-            "document_found": True, "assembly_found": True, "assembled": False,
-            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 7,
-            "assembly_items_available": True, "assembly_items": [],
-            "basket_items": [
-                {
-                    "product_code": "SOLD", "product_name": "Sold product",
-                    "series": "S1", "basket_quantity": 5,
-                },
-                {
-                    "product_code": "RETURNED", "product_name": "Returned product",
-                    "series": "S2", "basket_quantity": 2,
-                },
-            ],
-            "unassembled_items": [],
-        }
-
-        ignored = bot.ignore_wms_basket(wms)
-        comparison = bot.compare_series(smartup, ignored)
-
-        self.assertFalse(ignored["basket_has_items"])
-        self.assertTrue(comparison["matches"])
-        self.assertEqual(comparison["items"], [])
-
-    def test_lpu_is_detected_from_smartup_work_zone_not_warehouse(self):
-        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "ЛПУ"}}))
-        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "andijan.lpu"}}))
-        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "andijan.lpu1"}}))
-        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "карши.лпу2"}}))
-        self.assertFalse(bot.is_lpu_work_zone({"order": {"room_name": "lpumed"}}))
-        self.assertFalse(bot.is_lpu_work_zone({"order": {"room_name": "andijan.city8"}}))
-
-    def test_basket_quantity_above_return_remains_an_error(self):
-        smartup = {
-            "order": {"order_products": [{
-                "product_code": "A1", "card_code": "S1", "return_quant": 2,
-            }]}
-        }
-        wms = {
-            "document_found": True, "assembly_found": True, "assembled": False,
-            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 3,
-            "assembly_items": [], "basket_items": [{
-                "product_code": "A1", "series": "S1", "basket_quantity": 3,
-            }], "unassembled_items": [],
-        }
-
-        reconciled = bot.reconcile_wms_return_basket(smartup, wms)
-
-        self.assertTrue(reconciled["basket_has_items"])
-        self.assertEqual(reconciled["basket_quantity"], 1)
-        self.assertEqual(reconciled["basket_items"][0]["basket_quantity"], 1)
-
-    def test_blank_basket_series_is_never_hidden_as_a_return(self):
-        smartup = {
-            "order": {"order_products": [{
-                "product_code": "A1", "card_code": "S1", "return_quant": 2,
-            }]}
-        }
-        wms = {
-            "document_found": True, "assembly_found": True, "assembled": False,
-            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 2,
-            "assembly_items": [], "basket_items": [{
-                "product_code": "A1", "product_name": "No series",
-                "series": "", "basket_quantity": 2,
-            }], "unassembled_items": [],
-        }
-
-        reconciled = bot.reconcile_wms_return_basket(smartup, wms)
-        lines, problems, unavailable = bot.format_wms(reconciled, "B#V")
-
-        self.assertTrue(reconciled["basket_has_items"])
-        self.assertEqual(reconciled["return_basket_items"], [])
-        self.assertTrue(any("В WMS не заполнен номер серии" in line for line in lines))
-        self.assertEqual((problems, unavailable), (1, 0))
 
     def test_blank_assembly_series_is_reported_without_false_missing_item(self):
         smartup = {

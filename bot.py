@@ -3,7 +3,6 @@ import base64
 import html
 import json
 import logging
-import math
 import os
 import re
 import sys
@@ -283,11 +282,11 @@ def help_text(language="ru"):
             "• Qoralama — operator rasmiylashtirishni yakunlaydi.\n"
             "• Yangi — operator arizani qayta ishlashga o'tkazadi.\n"
             "• Qayta ishlanmoqda — moliya bo'limi tekshiradi.\n"
-            "• Kutilmoqda — order, BYAS, yig'ish, savat va seriyalar tekshiriladi.\n"
-            "• Jo'natildi yoki Yetkazildi — yig'ish, savat va seriyalar tekshiriladi.\n"
+            "• Kutilmoqda — order, BYAS, yig'ish va seriyalar tekshiriladi.\n"
+            "• Jo'natildi yoki Yetkazildi — yig'ish va seriyalar tekshiriladi.\n"
             "• Arxivlandi — hujjat, EHF, shartnoma va TMSdagi TTN tekshiriladi.\n\n"
-            "Order yoki BYAS topilmasa, yig'ish tugallanmagan bo'lsa, savatda tovar qolsa "
-            "yoki seriyalar mos kelmasa — omborga murojaat qiling.\n\n"
+            "Order yoki BYAS topilmasa, yig'ish tugallanmagan bo'lsa yoki seriyalar "
+            "mos kelmasa — omborga murojaat qiling.\n\n"
             "TMSdagi muammolar umumiy natijaga ta'sir qilmaydi va alohida xabarda ko'rsatiladi."
         )
     return (
@@ -301,10 +300,10 @@ def help_text(language="ru"):
         "• Черновик — оператор завершает оформление.\n"
         "• Новый — оператор переводит заявку в обработку.\n"
         "• В обработке — проверка финансовым отделом.\n"
-        "• В ожидании — проверяются ордер, БЯС, сборка, корзина и серии.\n"
-        "• Отгружен или Доставлен — проверяются сборка, корзина и серии.\n"
+        "• В ожидании — проверяются ордер, БЯС, сборка и серии.\n"
+        "• Отгружен или Доставлен — проверяются сборка и серии.\n"
         "• Архивирован — проверяются документ, ЭСФ, договор и ТТН в TMS.\n\n"
-        "Если ордер или БЯС не найдены, сборка не завершена, в корзине остался товар "
+        "Если ордер или БЯС не найдены, сборка не завершена "
         "или серии не совпали — обратитесь на склад.\n\n"
         "Проблемы TMS не влияют на общий итог и приходят отдельным сообщением."
     )
@@ -314,7 +313,6 @@ def help_text(language="ru"):
 # business rules cannot silently diverge between the Russian and Uzbek interfaces.
 UZ_REPLACEMENTS = {
     "Серии или количество Smartup и WMS не совпадают": "Smartup va WMS seriyalari yoki miqdori mos emas",
-    "Обратитесь на склад: товар необходимо убрать из корзины": "Omborga murojaat qiling: tovarni savatdan olib tashlash kerak",
     "Обратитесь на склад: проверьте серии товара внутри сборки": "Omborga murojaat qiling: yig'im ichidagi tovar seriyalarini tekshiring",
     "Заявка всё ещё находится в ожидании. Обратитесь на склад": "Ariza hali ham kutish bosqichida. Omborga murojaat qiling",
     "Обратитесь на склад для перевода заявки в статус «Доставлен»": "Arizani «Yetkazildi» holatiga o'tkazish uchun omborga murojaat qiling",
@@ -341,14 +339,12 @@ UZ_REPLACEMENTS = {
     "Сборка не начата: БЯС не выбрана или помечена на удаление": "Yig'ish boshlanmagan: BYAS tanlanmagan yoki o'chirish uchun belgilangan",
     "Сборка товара не завершена": "Tovarni yig'ish yakunlanmagan",
     "Сборка не завершена: несобранных позиций —": "Yig'ish yakunlanmagan, yig'ilmagan pozitsiyalar:",
-    "В корзине осталось товара": "Savatda tovar qolgan",
     "Не удалось проверить серии товара": "Tovar seriyalarini tekshirib bo'lmadi",
     "Сверка серий не выполнена": "Seriyalar solishtirilmadi",
     "Сборка завершена, но заявка всё ещё находится в ожидании": "Yig'ish tugagan, ammo ariza hali ham kutish bosqichida",
     "Заявка ещё не переведена в статус «Доставлен»": "Ariza hali «Yetkazildi» holatiga o'tkazilmagan",
     "Доставленная заявка ещё не архивирована": "Yetkazilgan ariza hali arxivlanmagan",
     "Передать заявку в бухгалтерию": "Arizani buxgalteriyaga topshirish",
-    "Склад должен убрать товар из корзины": "Ombor tovarni savatdan olib tashlashi kerak",
     "Склад должен собрать оставшиеся товары": "Ombor qolgan tovarlarni yig'ishi kerak",
     "Склад должен выбрать действующую БЯС и начать сборку": "Ombor amaldagi BYASni tanlab, yig'ishni boshlashi kerak",
     "Склад должен выбрать БЯС и начать сборку": "Ombor BYASni tanlab, yig'ishni boshlashi kerak",
@@ -417,10 +413,8 @@ UZ_REPLACEMENTS = {
     "Серии Smartup и WMS совпадают": "Smartup va WMS seriyalari mos",
     "Несобранных позиций": "Yig'ilmagan pozitsiyalar",
     "Товаров с расхождениями": "Tafovutli tovarlar",
-    "Позиций в корзине": "Savatdagi pozitsiyalar",
     "таблица ниже": "jadval quyida",
     "WMS не вернула список несобранных товаров": "WMS yig'ilmagan tovarlar ro'yxatini bermadi",
-    "WMS не вернула состав корзины": "WMS savat tarkibini bermadi",
     "WMS не вернула состав сборки": "WMS yig'im tarkibini bermadi",
     "WMS не вернула логическое поле": "WMS mantiqiy maydonni bermadi",
     "WMS не вернула корректное числовое поле": "WMS to'g'ri raqamli maydonni bermadi",
@@ -1167,20 +1161,11 @@ def normalize_wms(data):
     result["assembly_marked_for_deletion"] = raw_deleted
     if raw_deleted:
         result["assembly_found"] = False
-    quantity = data.get("basket_quantity")
-    if (type(quantity) not in (int, float)
-            or (isinstance(quantity, float) and not math.isfinite(quantity))
-            or quantity < 0):
-        return {"_error": "WMS не вернула корректное числовое поле basket_quantity"}
-    flag = data.get("basket_has_items", False)
-    if not isinstance(flag, bool):
-        return {"_error": "WMS вернула неверный тип basket_has_items"}
-    result["basket_has_items"] = flag or quantity > 0
     raw_finished = data.get("assembly_finished", result["assembled"])
     result["assembly_finished"] = raw_finished if isinstance(raw_finished, bool) else result["assembled"]
     result["assembled"] = (
         result["document_found"] and result["assembly_found"]
-        and result["assembly_finished"] and not result["basket_has_items"]
+        and result["assembly_finished"]
     )
 
     result["assembly_items_available"] = "assembly_items" in data
@@ -1196,11 +1181,10 @@ def normalize_wms(data):
         assembly_items = []
     result["assembly_items"] = assembly_items
 
-    for field in ("unassembled_items", "basket_items"):
-        items = data.get(field, [])
-        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-            return {"_error": f"WMS вернула неверный формат {field}"}
-        result[field] = items
+    items = data.get("unassembled_items", [])
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        return {"_error": "WMS вернула неверный формат unassembled_items"}
+    result["unassembled_items"] = items
 
     # Keep supported aliases consistent with the calculated result.
     result["order_found"] = result["document_found"]
@@ -1301,70 +1285,6 @@ def smartup_return_quantities(smartup):
     return returned
 
 
-def reconcile_wms_return_basket(smartup, wms):
-    """Remove only basket quantities confirmed as returns by product and series."""
-    if not isinstance(wms, dict) or wms.get("_error"):
-        return wms
-
-    result = dict(wms)
-    allowed_returns = smartup_return_quantities(smartup)
-    used_returns = {}
-    accepted_items = []
-    problem_items = []
-    accepted_total = Decimal(0)
-
-    basket_items = wms.get("basket_items", [])
-    if not isinstance(basket_items, list):
-        return wms
-
-    for source in basket_items:
-        if not isinstance(source, dict):
-            problem_items.append(source)
-            continue
-        item = dict(source)
-        code = str(item.get("product_code") or "").strip()
-        series = str(item.get("series") or "").strip()
-        try:
-            quantity = decimal_value(item.get("basket_quantity"))
-        except (InvalidOperation, ValueError):
-            problem_items.append(item)
-            continue
-
-        accepted = Decimal(0)
-        if code and series and quantity > 0:
-            key = series_key(code, series)
-            available = max(allowed_returns.get(key, Decimal(0)) - used_returns.get(key, Decimal(0)), Decimal(0))
-            accepted = min(quantity, available)
-            if accepted > 0:
-                used_returns[key] = used_returns.get(key, Decimal(0)) + accepted
-                accepted_item = dict(item)
-                accepted_item["basket_quantity"] = native_quantity(accepted)
-                accepted_item["quantity"] = native_quantity(accepted)
-                accepted_items.append(accepted_item)
-                accepted_total += accepted
-
-        remaining = quantity - accepted
-        if remaining > 0:
-            item["basket_quantity"] = native_quantity(remaining)
-            problem_items.append(item)
-
-    try:
-        original_total = decimal_value(wms.get("basket_quantity"))
-        problem_total = max(original_total - accepted_total, Decimal(0))
-    except (InvalidOperation, ValueError):
-        problem_total = sum(
-            (decimal_value(item.get("basket_quantity")) for item in problem_items if isinstance(item, dict)),
-            Decimal(0),
-        )
-
-    result["basket_items"] = problem_items
-    result["basket_quantity"] = native_quantity(problem_total)
-    result["basket_has_items"] = bool(problem_items) or problem_total > 0
-    result["return_basket_items"] = accepted_items
-    result["return_basket_quantity"] = native_quantity(accepted_total)
-    return normalize_wms(result)
-
-
 def reconcile_wms_unassembled_returns(smartup, wms):
     """Subtract Smartup returns from WMS quantities still marked unassembled."""
     if not isinstance(wms, dict) or wms.get("_error"):
@@ -1433,33 +1353,6 @@ def reconcile_wms_unassembled_returns(smartup, wms):
     if source_items and not remaining_items and accepted_items:
         result["assembly_finished"] = True
     return normalize_wms(result)
-
-
-def ignore_wms_basket(wms):
-    """Outside LPU, basket is not an error but may confirm expected goods."""
-    if not isinstance(wms, dict) or wms.get("_error"):
-        return wms
-    result = dict(wms)
-    result["ignored_basket_items"] = list(wms.get("basket_items", []))
-    result["basket_items"] = []
-    result["basket_quantity"] = 0
-    result["basket_has_items"] = False
-    return normalize_wms(result)
-
-
-def is_lpu_work_zone(smartup):
-    order = smartup.get("order", {})
-    if not isinstance(order, dict):
-        return False
-    values = (
-        order.get("room_name"), order.get("room_code"),
-        order.get("work_zone_name"), order.get("work_zone_code"),
-    )
-    for value in values:
-        text = str(value or "").casefold()
-        if re.search(r"(^|[^0-9a-zа-яё])(?:лпу|lpu)\d*([^0-9a-zа-яё]|$)", text):
-            return True
-    return False
 
 
 def compare_series(smartup, wms):
@@ -1581,31 +1474,6 @@ def compare_series(smartup, wms):
             continue
         key = series_key(code, series)
         actual[key] = actual.get(key, Decimal(0)) + number
-        labels.setdefault(key, (code, series, name))
-
-    # Outside LPU the basket itself is not a problem.  Its exact product/series
-    # rows may cover a Smartup quantity missing from BYAS, but never create an
-    # excess: returned or otherwise extra basket goods stay ignored.
-    for item in wms.get("ignored_basket_items", []):
-        if not isinstance(item, dict):
-            continue
-        code = str(item.get("product_code") or "").strip()
-        series = str(item.get("series") or "").strip()
-        if not code or not series:
-            continue
-        key = series_key(code, series)
-        if key not in expected:
-            continue
-        try:
-            basket_quantity = decimal_value(item.get("basket_quantity"))
-        except (InvalidOperation, ValueError):
-            continue
-        missing_quantity = max(expected[key] - actual.get(key, Decimal(0)), Decimal(0))
-        credited_quantity = min(max(basket_quantity, Decimal(0)), missing_quantity)
-        if credited_quantity <= 0:
-            continue
-        actual[key] = actual.get(key, Decimal(0)) + credited_quantity
-        name = str(item.get("product_name") or "").strip()
         labels.setdefault(key, (code, series, name))
 
     issues = list(dict.fromkeys(data_issues))
@@ -1741,11 +1609,7 @@ def format_wms(wms, status_code, responsible="", series_check=None):
             warehouse_contact = True
         else:
             lines.extend(["✅ БЯС найдена", "✅ Сборка завершена"])
-            if wms["basket_has_items"]:
-                action = "Обратитесь на склад: товар необходимо убрать из корзины"
-                problems = 1
-                warehouse_contact = True
-            elif series_check and not series_check.get("available"):
+            if series_check and not series_check.get("available"):
                 lines.append("⚠️ Сверка серий не выполнена")
                 for issue in series_check.get("issues", [])[:3]:
                     lines.append(f"   • {issue}")
@@ -1790,17 +1654,6 @@ def format_wms(wms, status_code, responsible="", series_check=None):
             elif not action and status_code == "B#V":
                 action = "Передайте заявку в бухгалтерию для архивирования"
                 problems = 1
-    quantity = wms["basket_quantity"]
-    if quantity > 0:
-        lines.append(f"❌ В корзине осталось товара: {quantity:,}".replace(",", " ").removesuffix(".0"))
-        basket_items = wms.get("basket_items", [])
-        if basket_items:
-            lines.append(f"🧺 Позиций в корзине: {len(basket_items)} — таблица ниже")
-            for item in basket_items:
-                if not str(item.get("series") or "").strip():
-                    lines.append(f"   • В WMS не заполнен номер серии: {item_label(item)}")
-        else:
-            lines.append("⚠️ WMS не вернула состав корзины")
     return lines, problems, 0
 
 
@@ -2105,21 +1958,12 @@ def collect_wms_tables(results, language="ru"):
         region_name = str(region.get("name") or "").strip()
         suffix = f" — {region_name}" if region_name else ""
         unassembled = wms.get("unassembled_items", [])
-        basket = wms.get("basket_items", [])
         if unassembled:
             tables.append({
                 "title": (f"📦 Yig'ilmagan{suffix}" if language == "uz" else f"📦 Не собрано{suffix}"),
                 "items": unassembled,
                 "quantity_field": "remaining_quantity",
                 "quantity_title": "Yig'ilmagan" if language == "uz" else "Не собрано",
-                "language": language,
-            })
-        if basket:
-            tables.append({
-                "title": (f"🧺 Savatdagi tovarlar{suffix}" if language == "uz" else f"🧺 Товары в корзине{suffix}"),
-                "items": basket,
-                "quantity_field": "basket_quantity",
-                "quantity_title": "Savatda" if language == "uz" else "В корзине",
                 "language": language,
             })
         series_check = region.get("series_check") or {}
@@ -2493,9 +2337,6 @@ def wms_summary(wms, status_code, series_check=None, responsible=""):
         count = len(normalized.get("unassembled_items", []))
         reason = f"Сборка не завершена: несобранных позиций — {count}" if count else "Сборка товара не завершена"
         return reason, "Склад должен собрать оставшиеся товары", owner
-    if normalized["basket_has_items"]:
-        quantity = normalized.get("basket_quantity", 0)
-        return f"В корзине осталось товара: {quantity:g}", "Склад должен убрать товар из корзины", owner
     if series_check and not series_check.get("available"):
         return "Не удалось проверить серии товара", "Обратиться на склад", owner
     if series_check and not series_check.get("matches"):
@@ -2883,8 +2724,6 @@ def check_order(config, doc_number, language="ru"):
     results["warehouse_routing_exact"] = bool(matched_region_indexes)
     results["warehouse_names"] = warehouse_names
     results["warehouse_details"] = warehouse_details
-    results["is_lpu_work_zone"] = is_lpu_work_zone(smartup)
-
     indexes_to_check = list(matched_region_indexes) if matched_region_indexes else list(range(len(regions)))
     for index, item in enumerate(results["regions"]):
         item["selected"] = index in indexes_to_check
@@ -2934,16 +2773,11 @@ def check_order(config, doc_number, language="ru"):
             if not isinstance(wms, dict) or wms.get("_error"):
                 continue
             wms = reconcile_wms_unassembled_returns(smartup, wms)
-            if results.get("is_lpu_work_zone"):
-                wms = reconcile_wms_return_basket(smartup, wms)
-            else:
-                wms = ignore_wms_basket(wms)
             item["wms"] = wms
             if (
                 wms.get("document_found")
                 and wms.get("assembly_found")
                 and wms.get("assembly_finished")
-                and not wms.get("basket_has_items")
             ):
                 item["series_check"] = compare_series(smartup, wms)
 
