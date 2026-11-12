@@ -337,7 +337,8 @@ UZ_REPLACEMENTS = {
     "WMS проверить не удалось: нет настроенных складов": "WMSni tekshirib bo'lmadi: sozlangan omborlar yo'q",
     "Для склада не настроена WMS": "Ombor uchun WMS sozlanmagan",
     "Расходный ордер не найден в WMS": "WMSda chiqim orderi topilmadi",
-    "Сборка не начата: БЯС не выбрана": "Yig'ish boshlanmagan: BYAS tanlanmagan",
+    "Сборка не начата: БЯС помечена на удаление": "Yig'ish boshlanmagan: BYAS o'chirish uchun belgilangan",
+    "Сборка не начата: БЯС не выбрана или помечена на удаление": "Yig'ish boshlanmagan: BYAS tanlanmagan yoki o'chirish uchun belgilangan",
     "Сборка товара не завершена": "Tovarni yig'ish yakunlanmagan",
     "Сборка не завершена: несобранных позиций —": "Yig'ish yakunlanmagan, yig'ilmagan pozitsiyalar:",
     "В корзине осталось товара": "Savatda tovar qolgan",
@@ -349,6 +350,7 @@ UZ_REPLACEMENTS = {
     "Передать заявку в бухгалтерию": "Arizani buxgalteriyaga topshirish",
     "Склад должен убрать товар из корзины": "Ombor tovarni savatdan olib tashlashi kerak",
     "Склад должен собрать оставшиеся товары": "Ombor qolgan tovarlarni yig'ishi kerak",
+    "Склад должен выбрать действующую БЯС и начать сборку": "Ombor amaldagi BYASni tanlab, yig'ishni boshlashi kerak",
     "Склад должен выбрать БЯС и начать сборку": "Ombor BYASni tanlab, yig'ishni boshlashi kerak",
     "Повторить проверку или обратиться на склад": "Tekshiruvni takrorlash yoki omborga murojaat qilish",
     "Обратиться к администратору интеграции": "Integratsiya administratoriga murojaat qilish",
@@ -407,6 +409,8 @@ UZ_REPLACEMENTS = {
     "расходный ордер найден": "chiqim orderi topildi",
     "Сборка товара не завершена": "Tovar yig'imi yakunlanmagan",
     "БЯС не выбрана": "BYAS tanlanmagan",
+    "БЯС помечена на удаление": "BYAS o'chirish uchun belgilangan",
+    "Действующая БЯС не найдена: она не выбрана или помечена на удаление": "Amaldagi BYAS topilmadi: u tanlanmagan yoki o'chirish uchun belgilangan",
     "БЯС найдена": "BYAS topildi",
     "Сборка завершена": "Yig'ish yakunlandi",
     "Серии Smartup и WMS не совпадают": "Smartup va WMS seriyalari mos emas",
@@ -442,8 +446,10 @@ UZ_REPLACEMENTS = {
     "Не удалось проверить WMS": "WMSni tekshirib bo'lmadi",
     "Нет в сборке": "Yig'imda yo'q",
     "Лишняя серия в сборке": "Yig'imdagi ortiqcha seriya",
+    "Товар отсутствует в Smartup": "Tovar Smartupda mavjud emas",
     "Количество не совпало": "Miqdor mos emas",
-    "Собран возвращенный товар": "Qaytarilgan tovar yig'ilgan",
+    "Собрано больше, чем нужно": "Keragidan ko'p yig'ilgan",
+    "Собрано меньше, чем нужно": "Keragidan kam yig'ilgan",
     "ожидалось": "kutilgan",
     "количество": "miqdor",
     "серия": "seriya",
@@ -1152,6 +1158,15 @@ def normalize_wms(data):
         if not isinstance(value, bool):
             return {"_error": f"WMS не вернула логическое поле {target}"}
         result[target] = value
+    deletion_aliases = (
+        "assembly_marked_for_deletion", "assembly_deleted", "assembly_deletion_mark",
+    )
+    raw_deleted = next((data[key] for key in deletion_aliases if key in data), False)
+    if not isinstance(raw_deleted, bool):
+        return {"_error": "WMS вернула неверный тип признака удаления БЯС"}
+    result["assembly_marked_for_deletion"] = raw_deleted
+    if raw_deleted:
+        result["assembly_found"] = False
     quantity = data.get("basket_quantity")
     if (type(quantity) not in (int, float)
             or (isinstance(quantity, float) and not math.isfinite(quantity))
@@ -1351,7 +1366,7 @@ def reconcile_wms_return_basket(smartup, wms):
 
 
 def ignore_wms_basket(wms):
-    """Basket has business meaning only for Smartup LPU work zones."""
+    """Outside LPU, basket is not an error but may confirm expected goods."""
     if not isinstance(wms, dict) or wms.get("_error"):
         return wms
     result = dict(wms)
@@ -1372,7 +1387,7 @@ def is_lpu_work_zone(smartup):
     )
     for value in values:
         text = str(value or "").casefold()
-        if re.search(r"(^|[^0-9a-zа-яё])(?:лпу|lpu)([^0-9a-zа-яё]|$)", text):
+        if re.search(r"(^|[^0-9a-zа-яё])(?:лпу|lpu)\d*([^0-9a-zа-яё]|$)", text):
             return True
     return False
 
@@ -1394,10 +1409,9 @@ def compare_series(smartup, wms):
         return {"available": False, "matches": False, "issues": ["Smartup вернул пустой список товаров"], "items": []}
 
     expected = {}
-    expected_sold = {}
-    expected_returns = {}
     actual = {}
     labels = {}
+    smartup_product_codes = set()
     data_issues = []
     blank_smartup = {}
     blank_wms = {}
@@ -1425,6 +1439,7 @@ def compare_series(smartup, wms):
         if not code:
             data_issues.append("В Smartup есть товар без product_code")
             continue
+        smartup_product_codes.add(code.casefold())
         try:
             number = decimal_value(quantity)
         except (InvalidOperation, ValueError):
@@ -1447,11 +1462,8 @@ def compare_series(smartup, wms):
                 entry["name"] = name
             continue
         key = series_key(code, series)
-        # BYAS must contain only the quantity actually sold. Returned quantity
-        # may remain in the basket for LPU warehouses, but never in assembly.
+        # BYAS must contain exactly the quantity sold after Smartup returns.
         expected[key] = expected.get(key, Decimal(0)) + sold_number
-        expected_sold[key] = expected_sold.get(key, Decimal(0)) + sold_number
-        expected_returns[key] = expected_returns.get(key, Decimal(0)) + max(return_number, Decimal(0))
         labels[key] = (code, series, name)
 
     for item in wms.get("assembly_items", []):
@@ -1478,37 +1490,35 @@ def compare_series(smartup, wms):
         actual[key] = actual.get(key, Decimal(0)) + number
         labels.setdefault(key, (code, series, name))
 
-    assembly_actual = dict(actual)
+    # Outside LPU the basket itself is not a problem.  Its exact product/series
+    # rows may cover a Smartup quantity missing from BYAS, but never create an
+    # excess: returned or otherwise extra basket goods stay ignored.
+    for item in wms.get("ignored_basket_items", []):
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("product_code") or "").strip()
+        series = str(item.get("series") or "").strip()
+        if not code or not series:
+            continue
+        key = series_key(code, series)
+        if key not in expected:
+            continue
+        try:
+            basket_quantity = decimal_value(item.get("basket_quantity"))
+        except (InvalidOperation, ValueError):
+            continue
+        missing_quantity = max(expected[key] - actual.get(key, Decimal(0)), Decimal(0))
+        credited_quantity = min(max(basket_quantity, Decimal(0)), missing_quantity)
+        if credited_quantity <= 0:
+            continue
+        actual[key] = actual.get(key, Decimal(0)) + credited_quantity
+        name = str(item.get("product_name") or "").strip()
+        labels.setdefault(key, (code, series, name))
 
     issues = list(dict.fromkeys(data_issues))
     mismatch_items = []
     blank_handled_keys = set()
     smartup_blank_actual_keys = set()
-    assembled_return_keys = set()
-
-    for key, return_quantity in expected_returns.items():
-        if return_quantity <= 0:
-            continue
-        assembled_quantity = assembly_actual.get(key, Decimal(0))
-        sold_quantity = expected_sold.get(key, Decimal(0))
-        returned_in_assembly = min(max(assembled_quantity - sold_quantity, Decimal(0)), return_quantity)
-        if returned_in_assembly <= 0:
-            continue
-        code, series, name = labels[key]
-        product = f"{name} ({code})" if name else code
-        problem = "Собран возвращенный товар"
-        issues.append(
-            f"{problem}: {product}, серия {series}, количество {display_quantity(returned_in_assembly)}"
-        )
-        mismatch_items.append({
-            "product_name": name or "Товар без наименования",
-            "product_code": code,
-            "series": series,
-            "smartup_quantity": display_quantity(return_quantity),
-            "wms_quantity": display_quantity(returned_in_assembly),
-            "problem": problem,
-        })
-        assembled_return_keys.add(key)
 
     for code_key, blank in sorted(blank_smartup.items()):
         candidates = [key for key in actual if key[0] == code_key and key not in expected]
@@ -1563,19 +1573,22 @@ def compare_series(smartup, wms):
         actual_quantity = actual.get(key, Decimal(0))
         if key in expected and expected_quantity == 0 and key not in actual:
             continue
-        if (
-            key in assembled_return_keys
-            and actual_quantity <= expected_sold.get(key, Decimal(0)) + expected_returns.get(key, Decimal(0))
-        ):
-            continue
         if key not in actual:
             problem = "Нет в сборке"
             issues.append(f"{problem}: {product}, серия {series}, ожидалось {display_quantity(expected_quantity)}")
         elif key not in expected:
-            problem = "Лишняя серия в сборке"
+            problem = (
+                "Товар отсутствует в Smartup"
+                if key[0] not in smartup_product_codes
+                else "Лишняя серия в сборке"
+            )
             issues.append(f"{problem}: {product}, серия {series}, количество {display_quantity(actual_quantity)}")
         elif expected_quantity != actual_quantity:
-            problem = "Количество не совпало"
+            problem = (
+                "Собрано больше, чем нужно"
+                if actual_quantity > expected_quantity
+                else "Собрано меньше, чем нужно"
+            )
             issues.append(
                 f"{problem}: {product}, серия {series}; Smartup {display_quantity(expected_quantity)}, "
                 f"WMS {display_quantity(actual_quantity)}"
@@ -1616,7 +1629,10 @@ def format_wms(wms, status_code, responsible="", series_check=None):
     else:
         lines.append("✅ WMS: расходный ордер найден")
         if not wms["assembly_found"]:
-            lines.append("⚠️ Сборка не начата: БЯС не выбрана")
+            if wms.get("assembly_marked_for_deletion"):
+                lines.append("⚠️ Сборка не начата: БЯС помечена на удаление")
+            else:
+                lines.append("⚠️ Сборка не начата: БЯС не выбрана или помечена на удаление")
             action = "Обратитесь на склад"
             problems = 1
             warehouse_contact = True
@@ -2374,7 +2390,12 @@ def wms_summary(wms, status_code, series_check=None, responsible=""):
     if not normalized["document_found"]:
         return "Расходный ордер не найден в WMS", "Обратиться на склад", owner
     if not normalized["assembly_found"]:
-        return "Сборка не начата: БЯС не выбрана", "Склад должен выбрать БЯС и начать сборку", owner
+        reason = (
+            "БЯС помечена на удаление"
+            if normalized.get("assembly_marked_for_deletion")
+            else "Действующая БЯС не найдена: она не выбрана или помечена на удаление"
+        )
+        return reason, "Склад должен выбрать действующую БЯС и начать сборку", owner
     if not normalized["assembly_finished"]:
         count = len(normalized.get("unassembled_items", []))
         reason = f"Сборка не завершена: несобранных позиций — {count}" if count else "Сборка товара не завершена"

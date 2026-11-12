@@ -189,7 +189,7 @@ class BotTests(unittest.TestCase):
         self.assertFalse(result["matches"])
         self.assertEqual(result["items"][0]["smartup_quantity"], "5")
         self.assertEqual(result["items"][0]["wms_quantity"], "3")
-        self.assertEqual(result["items"][0]["problem"], "Количество не совпало")
+        self.assertEqual(result["items"][0]["problem"], "Собрано меньше, чем нужно")
 
         wms_result = {
             "document_found": True,
@@ -206,6 +206,47 @@ class BotTests(unittest.TestCase):
         self.assertIn("📦 Товаров с расхождениями: 1 — таблица ниже", lines)
         self.assertFalse(any("Количество не совпало: Test product" in line for line in lines))
         self.assertEqual((problems, unavailable), (1, 0))
+
+    def test_deleted_byas_is_not_treated_as_an_active_assembly(self):
+        wms = {
+            "document_found": True,
+            "assembly_found": True,
+            "assembly_marked_for_deletion": True,
+            "assembled": True,
+            "assembly_finished": True,
+            "basket_has_items": False,
+            "basket_quantity": 0,
+            "assembly_items": [],
+            "unassembled_items": [],
+            "basket_items": [],
+        }
+
+        normalized = bot.normalize_wms(wms)
+        lines, problems, unavailable = bot.format_wms(wms, "B#V")
+        reason, action, _ = bot.wms_summary(wms, "B#V")
+
+        self.assertFalse(normalized["assembly_found"])
+        self.assertFalse(normalized["assembled"])
+        self.assertTrue(any("БЯС помечена на удаление" in line for line in lines))
+        self.assertEqual((problems, unavailable), (1, 0))
+        self.assertEqual(reason, "БЯС помечена на удаление")
+        self.assertIn("действующую БЯС", action)
+
+    def test_missing_byas_uses_safe_wording_when_wms_has_no_deletion_flag(self):
+        wms = {
+            "document_found": True,
+            "assembly_found": False,
+            "assembled": False,
+            "basket_has_items": False,
+            "basket_quantity": 0,
+            "assembly_items": [],
+            "unassembled_items": [],
+            "basket_items": [],
+        }
+
+        reason, _, _ = bot.wms_summary(wms, "B#V")
+
+        self.assertIn("не выбрана или помечена на удаление", reason)
 
     def test_fully_returned_item_assembled_in_byas_is_an_error(self):
         smartup = {
@@ -235,9 +276,85 @@ class BotTests(unittest.TestCase):
         self.assertTrue(result["available"])
         self.assertFalse(result["matches"])
         self.assertEqual(len(result["items"]), 1)
-        self.assertEqual(result["items"][0]["problem"], "Собран возвращенный товар")
-        self.assertEqual(result["items"][0]["smartup_quantity"], "2")
+        self.assertEqual(result["items"][0]["problem"], "Собрано больше, чем нужно")
+        self.assertEqual(result["items"][0]["smartup_quantity"], "0")
         self.assertEqual(result["items"][0]["wms_quantity"], "2")
+
+    def test_partial_return_compares_wms_with_quantity_that_must_be_assembled(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1",
+                    "product_name": "Partially returned product",
+                    "card_code": "S1",
+                    "order_quant": 10,
+                    "sold_quant": 6,
+                    "return_quant": 4,
+                }]
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1",
+                "product_name": "Partially returned product",
+                "series": "S1",
+                "quantity": 8,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["items"][0]["smartup_quantity"], "6")
+        self.assertEqual(result["items"][0]["wms_quantity"], "8")
+        self.assertEqual(result["items"][0]["problem"], "Собрано больше, чем нужно")
+
+    def test_wms_product_missing_from_smartup_has_clear_problem_text(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1", "product_name": "Expected",
+                    "card_code": "S1", "sold_quant": 1,
+                }]
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A2", "product_name": "WMS only",
+                "series": "S2", "quantity": 3,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+        wms_only = next(item for item in result["items"] if item["product_code"] == "A2")
+
+        self.assertEqual(wms_only["smartup_quantity"], "—")
+        self.assertEqual(wms_only["wms_quantity"], "3")
+        self.assertEqual(wms_only["problem"], "Товар отсутствует в Smartup")
+
+    def test_different_wms_series_for_smartup_product_stays_extra_series(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1", "product_name": "Expected",
+                    "card_code": "S1", "sold_quant": 1,
+                }]
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1", "product_name": "Expected",
+                "series": "S2", "quantity": 1,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+        extra_series = next(item for item in result["items"] if item["series"] == "S2")
+
+        self.assertEqual(extra_series["problem"], "Лишняя серия в сборке")
 
     def test_series_comparison_reconstructs_original_quantity_when_order_quantity_is_missing(self):
         smartup = {
@@ -329,9 +446,51 @@ class BotTests(unittest.TestCase):
         self.assertEqual(ignored["basket_items"], [])
         self.assertEqual(len(ignored["ignored_basket_items"]), 1)
 
+    def test_non_lpu_basket_covers_expected_goods_without_flagging_returned_extras(self):
+        smartup = {
+            "order": {"order_products": [
+                {
+                    "product_code": "SOLD", "product_name": "Sold product",
+                    "card_code": "S1", "order_quant": 5,
+                    "sold_quant": 5, "return_quant": 0,
+                },
+                {
+                    "product_code": "RETURNED", "product_name": "Returned product",
+                    "card_code": "S2", "order_quant": 2,
+                    "sold_quant": 0, "return_quant": 2,
+                },
+            ]}
+        }
+        wms = {
+            "document_found": True, "assembly_found": True, "assembled": False,
+            "assembly_finished": True, "basket_has_items": True, "basket_quantity": 7,
+            "assembly_items_available": True, "assembly_items": [],
+            "basket_items": [
+                {
+                    "product_code": "SOLD", "product_name": "Sold product",
+                    "series": "S1", "basket_quantity": 5,
+                },
+                {
+                    "product_code": "RETURNED", "product_name": "Returned product",
+                    "series": "S2", "basket_quantity": 2,
+                },
+            ],
+            "unassembled_items": [],
+        }
+
+        ignored = bot.ignore_wms_basket(wms)
+        comparison = bot.compare_series(smartup, ignored)
+
+        self.assertFalse(ignored["basket_has_items"])
+        self.assertTrue(comparison["matches"])
+        self.assertEqual(comparison["items"], [])
+
     def test_lpu_is_detected_from_smartup_work_zone_not_warehouse(self):
         self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "ЛПУ"}}))
         self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "andijan.lpu"}}))
+        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "andijan.lpu1"}}))
+        self.assertTrue(bot.is_lpu_work_zone({"order": {"room_name": "карши.лпу2"}}))
+        self.assertFalse(bot.is_lpu_work_zone({"order": {"room_name": "lpumed"}}))
         self.assertFalse(bot.is_lpu_work_zone({"order": {"room_name": "andijan.city8"}}))
 
     def test_basket_quantity_above_return_remains_an_error(self):
