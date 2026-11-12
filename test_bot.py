@@ -310,6 +310,35 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["wms_quantity"], "8")
         self.assertEqual(result["items"][0]["problem"], "Собрано больше, чем нужно")
 
+    def test_one_hundred_ordered_twenty_returned_requires_eighty_in_wms(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1",
+                    "product_name": "Returned quantity example",
+                    "card_code": "S1",
+                    "order_quant": 100,
+                    "sold_quant": 80,
+                    "return_quant": 20,
+                }]
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1",
+                "product_name": "Returned quantity example",
+                "series": "S1",
+                "quantity": 80,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["items"], [])
+
     def test_wms_product_missing_from_smartup_has_clear_problem_text(self):
         smartup = {
             "order": {

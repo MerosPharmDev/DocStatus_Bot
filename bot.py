@@ -1422,9 +1422,8 @@ def compare_series(smartup, wms):
         code = str(product.get("product_code") or "").strip()
         series = str(product.get("card_code") or "").strip()
         name = str(product.get("product_name") or product.get("name") or "").strip()
-        # WMS expense records the quantity originally processed by the warehouse
-        # and is not reduced by later Smartup returns.  Prefer order_quant; if it
-        # is absent, reconstruct the original quantity as sold + returned.
+        # Required WMS quantity is the Smartup order quantity minus returns.
+        # If order_quant is absent, reconstruct it as sold + returned first.
         quantity = product.get("order_quant")
         if quantity is None and product.get("sold_quant") is not None and product.get("return_quant") is not None:
             try:
@@ -1450,20 +1449,17 @@ def compare_series(smartup, wms):
             return_number = decimal_value(product.get("return_quant", 0))
         except (InvalidOperation, ValueError):
             return_number = Decimal(0)
-        try:
-            sold_number = decimal_value(product.get("sold_quant"))
-        except (InvalidOperation, ValueError):
-            sold_number = max(number - return_number, Decimal(0))
+        required_number = max(number - return_number, Decimal(0))
         if not series:
             code_key = code.casefold()
             entry = blank_smartup.setdefault(code_key, {"code": code, "name": name, "quantity": Decimal(0)})
-            entry["quantity"] += number
+            entry["quantity"] += required_number
             if not entry["name"] and name:
                 entry["name"] = name
             continue
         key = series_key(code, series)
         # BYAS must contain exactly the quantity sold after Smartup returns.
-        expected[key] = expected.get(key, Decimal(0)) + sold_number
+        expected[key] = expected.get(key, Decimal(0)) + required_number
         labels[key] = (code, series, name)
 
     for item in wms.get("assembly_items", []):
