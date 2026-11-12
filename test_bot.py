@@ -339,6 +339,38 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result["issues"], [])
         self.assertEqual(result["items"], [])
 
+    def test_smartup_action_quantity_is_added_to_regular_wms_quantity(self):
+        smartup = {
+            "order": {
+                "order_products": [{
+                    "product_code": "A1", "product_name": "Promo product",
+                    "card_code": "S1", "order_quant": 16,
+                    "sold_quant": 16, "return_quant": 0,
+                }],
+                "order_actions": [{
+                    "product_code": "A1", "product_name": "Promo product",
+                    "card_code": None, "order_quant": 5,
+                    "sold_quant": 5, "return_quant": 0,
+                    "bonus_id": "72676", "action_name": "3+1",
+                    "details": [{"card_code": "S1", "sold_quant": 5}],
+                }],
+                "order_gifts": [],
+            }
+        }
+        wms = {
+            "assembly_items_available": True,
+            "assembly_items": [{
+                "product_code": "A1", "product_name": "Promo product",
+                "series": "S1", "quantity": 21,
+            }],
+        }
+
+        result = bot.compare_series(smartup, wms)
+
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(result["items"], [])
+
     def test_wms_product_missing_from_smartup_has_clear_problem_text(self):
         smartup = {
             "order": {

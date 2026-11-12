@@ -1475,7 +1475,12 @@ def compare_series(smartup, wms):
     products = order.get("order_products", []) if isinstance(order, dict) else []
     if not isinstance(products, list):
         return {"available": False, "matches": False, "issues": ["Smartup не вернул товары заявки"], "items": []}
-    if not products:
+    product_sources = [(product, False) for product in products]
+    for field in ("order_actions", "order_gifts"):
+        rows = order.get(field, []) if isinstance(order, dict) else []
+        if isinstance(rows, list):
+            product_sources.extend((product, True) for product in rows)
+    if not product_sources:
         return {"available": False, "matches": False, "issues": ["Smartup вернул пустой список товаров"], "items": []}
 
     expected = {}
@@ -1486,7 +1491,7 @@ def compare_series(smartup, wms):
     blank_smartup = {}
     blank_wms = {}
 
-    for product in products:
+    for product, is_promo in product_sources:
         if not isinstance(product, dict):
             continue
         code = str(product.get("product_code") or "").strip()
@@ -1520,6 +1525,28 @@ def compare_series(smartup, wms):
         except (InvalidOperation, ValueError):
             return_number = Decimal(0)
         required_number = max(number - return_number, Decimal(0))
+        if not series and is_promo:
+            promo_series = []
+            details = product.get("details", [])
+            if isinstance(details, list):
+                for detail in details:
+                    if not isinstance(detail, dict):
+                        continue
+                    detail_series = str(detail.get("card_code") or "").strip()
+                    if not detail_series:
+                        continue
+                    try:
+                        detail_quantity = decimal_value(detail.get("sold_quant"))
+                    except (InvalidOperation, ValueError):
+                        continue
+                    if detail_quantity > 0:
+                        promo_series.append((detail_series, detail_quantity))
+            if promo_series:
+                for detail_series, detail_quantity in promo_series:
+                    key = series_key(code, detail_series)
+                    expected[key] = expected.get(key, Decimal(0)) + detail_quantity
+                    labels[key] = (code, detail_series, name)
+                continue
         if not series:
             code_key = code.casefold()
             entry = blank_smartup.setdefault(code_key, {"code": code, "name": name, "quantity": Decimal(0)})
