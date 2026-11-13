@@ -163,6 +163,53 @@ class BotTests(unittest.TestCase):
                 self.assertIn(expected, text)
                 self.assertEqual(results["_summary"]["outcome"], "pending")
 
+    def test_future_delivery_date_explains_why_delivered_order_is_not_archived(self):
+        results = {
+            "smartup": {
+                "document_found": True,
+                "status_code": "B#V",
+                "status": "Доставлен",
+                "order": {"delivery_date": "31.12.2999"},
+            },
+            "warehouse_routing_exact": True,
+            "warehouse_codes": [],
+            "warehouse_names": ["Склад Тест"],
+            "regions": [{
+                "name": "Тест",
+                "selected": True,
+                "wms_responsible": "Склад Тест",
+                "wms": {
+                    "document_found": True,
+                    "assembly_found": True,
+                    "assembled": True,
+                    "assembly_finished": True,
+                    "assembly_items": [],
+                    "unassembled_items": [],
+                },
+                "series_check": {
+                    "available": True, "matches": True, "issues": [], "items": [],
+                },
+            }],
+            "_elapsed": 0,
+        }
+
+        russian = bot.format_result("42", results, "ru")
+        uzbek = bot.format_result("42", results, "uz")
+
+        self.assertIn("⚠️ Ещё не доставлен", russian)
+        self.assertIn("📅 Дата доставки: 31.12.2999", russian)
+        self.assertIn("Дождаться доставки", russian)
+        self.assertIn("⚠️ Hali yetkazilmagan", uzbek)
+        self.assertIn("📅 Yetkazib berish sanasi: 31.12.2999", uzbek)
+        self.assertIn("Yetkazib berishni kutish", uzbek)
+
+    def test_delivery_date_is_future_only_after_tashkent_calendar_day(self):
+        today = bot.datetime(2026, 11, 13).date()
+
+        self.assertEqual(bot.future_delivery_date_text("14.11.2026", today), "14.11.2026")
+        self.assertEqual(bot.future_delivery_date_text("13.11.2026", today), "")
+        self.assertEqual(bot.future_delivery_date_text("12.11.2026", today), "")
+
     def test_series_mismatch_contains_complete_table_row(self):
         smartup = {
             "order": {

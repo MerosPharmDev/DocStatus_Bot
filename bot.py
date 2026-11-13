@@ -345,6 +345,9 @@ UZ_REPLACEMENTS = {
     "Заявка ещё не переведена в статус «Доставлен»": "Ariza hali «Yetkazildi» holatiga o'tkazilmagan",
     "Доставленная заявка ещё не архивирована": "Yetkazilgan ariza hali arxivlanmagan",
     "Передать заявку в бухгалтерию": "Arizani buxgalteriyaga topshirish",
+    "Ещё не доставлен": "Hali yetkazilmagan",
+    "Дата доставки": "Yetkazib berish sanasi",
+    "Дождаться доставки": "Yetkazib berishni kutish",
     "Склад должен собрать оставшиеся товары": "Ombor qolgan tovarlarni yig'ishi kerak",
     "Склад должен выбрать действующую БЯС и начать сборку": "Ombor amaldagi BYASni tanlab, yig'ishni boshlashi kerak",
     "Склад должен выбрать БЯС и начать сборку": "Ombor BYASni tanlab, yig'ishni boshlashi kerak",
@@ -1229,6 +1232,34 @@ def display_order_datetime(value):
         except ValueError:
             continue
     return text
+
+
+def parse_order_date(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(LOCAL_TIMEZONE)
+        return parsed.date()
+    except ValueError:
+        pass
+    for pattern in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def future_delivery_date_text(value, today=None):
+    delivery_date = parse_order_date(value)
+    current_date = today or datetime.now(LOCAL_TIMEZONE).date()
+    if delivery_date is None or delivery_date <= current_date:
+        return ""
+    return delivery_date.strftime("%d.%m.%Y")
 
 
 def item_label(item):
@@ -2319,7 +2350,7 @@ def format_tms_card(tms, region_name, responsible="", language="ru"):
     }
 
 
-def wms_summary(wms, status_code, series_check=None, responsible=""):
+def wms_summary(wms, status_code, series_check=None, responsible="", delivery_date=""):
     normalized = normalize_wms(wms)
     owner = str(responsible or "склад").strip()
     if normalized.get("_error"):
@@ -2348,6 +2379,13 @@ def wms_summary(wms, status_code, series_check=None, responsible=""):
     if status_code == "B#S":
         return "Заявка ещё не переведена в статус «Доставлен»", "Обратиться на склад", owner
     if status_code == "B#V":
+        future_date = future_delivery_date_text(delivery_date)
+        if future_date:
+            return (
+                "Ещё не доставлен",
+                "Дождаться доставки",
+                "логистика",
+            )
         return "Доставленная заявка ещё не архивирована", "Передать заявку в бухгалтерию", "бухгалтерия"
     return "", "", ""
 
@@ -2458,6 +2496,8 @@ def format_result(doc_number, results, language="ru"):
     unavailable_reasons = []
 
     smartup = results.get("smartup", {})
+    smartup_order = smartup.get("order", {}) if isinstance(smartup, dict) else {}
+    delivery_date = smartup_order.get("delivery_date", "") if isinstance(smartup_order, dict) else ""
     if smartup.get("_error"):
         error = localize_text(describe_error(smartup["_error"]), language)
         lines.append(message_text(language, "smartup.unavailable", error=error))
@@ -2528,6 +2568,13 @@ def format_result(doc_number, results, language="ru"):
             pending = True
 
         elif status_code in ("B#W", "B#S", "B#V"):
+            future_date = future_delivery_date_text(delivery_date) if status_code == "B#V" else ""
+            if future_date:
+                lines.extend([
+                    "",
+                    localize_text("⚠️ Ещё не доставлен", language),
+                    localize_text(f"📅 Дата доставки: {future_date}", language),
+                ])
             region_results = [item for item in results.get("regions", []) if item.get("selected", True)]
             if not results.get("warehouse_routing_exact", True):
                 matched_names = results.get("wms_matched_regions", [])
@@ -2550,7 +2597,7 @@ def format_result(doc_number, results, language="ru"):
                 unavailable += error_count
                 reason, action, owner = wms_summary(
                     item.get("wms", {}), status_code, item.get("series_check"),
-                    item.get("wms_responsible", ""),
+                    item.get("wms_responsible", ""), delivery_date,
                 )
                 if error_count:
                     add_unique(unavailable_reasons, reason)
